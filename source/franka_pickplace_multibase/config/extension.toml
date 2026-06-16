@@ -1,0 +1,23 @@
+[package]
+
+version = "0.1.0"
+category = "isaaclab"
+readme  = "README.md"
+
+title       = "Franka Pick-and-Place Multibase — Hierarchical Policy Training"
+author      = "Nepher Robotics"
+maintainer  = "Nepher Robotics"
+description = "Hierarchical Franka pick-and-place: Low-Level (LL) goal-conditioned EE tracking policy and High-Level (HL) classical planner with multi-base evaluation support."
+repository  = ""
+keywords    = ["franka", "pick-and-place", "franka-pickplace-multibase", "hierarchical", "goal-conditioned", "isaaclab"]
+
+[dependencies]
+"isaaclab"        = {}
+"isaaclab_assets" = {}
+"isaaclab_rl"     = {}
+"isaaclab_tasks"  = {}
+
+[[python.module]]
+name = "franka_pickplace_multibase"
+
+[isaac_lab_settings]
