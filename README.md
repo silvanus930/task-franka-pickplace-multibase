@@ -4,7 +4,7 @@
 
 Isaac Lab external project for hierarchical Franka robotic arm pick-and-place training across multiple base environments.
 
-![Franka Pick-and-Place simulation](docs/assets/franka-base-image.png)
+![Franka Pick-and-Place simulation](docs/assets/franka-pickplace-multi.gif)
 
 ## Architecture
 
@@ -17,17 +17,6 @@ DifferentialIK + BinaryGripper
     ↓
 Franka Panda (7-DOF + gripper)
 ```
-
-## Low-Level Policy
-
-| | |
-|---|---|
-| **Action** | 7D IK-Rel `(Δx,Δy,Δz,Δrx,Δry,Δrz)` + 1D binary gripper |
-| **Observation** | 41D: joint pos/vel, EE pose, target EE pose, grip cmd, gripper pos, last action |
-| **Command** | `ee_pose` (resampled every 4 s) + `grip_cmd` (per-episode) |
-| **Reward** | Coarse L2 + fine tanh for position & orientation; soft gripper match; smoothness |
-| **Curriculum** | Action-rate / joint-velocity penalties ramped 0.001 → 0.01/0.005 over 10 k iters |
-| **Network** | MLP [256, 128, 64], ELU, PPO (RSL-RL) |
 
 ## Install
 
@@ -53,39 +42,6 @@ python play.py --task=Nepher-Franka-PickPlace-LL-Play-v0
 ```
 
 `play.py` copies the latest checkpoint into `best_policy/best_policy.pt` and exports TorchScript + ONNX to `best_policy/exported/` for HL use.
-
----
-
-## High-Level Classical Pipeline — Container Task
-
-9-stage `PickPlacePlanner` drives the HL commands; the frozen LL policy executes them.
-Five varied YCB objects are scattered on the table each episode; the arm picks each one
-sequentially and drops it into a KLT bin container in the corner.
-
-| | |
-|---|---|
-| **Stages** | PRE_GRASP → DESCEND → GRASP → LIFT → CARRY → LOWER → RELEASE → RETRACT → DONE |
-| **Transition** | EE error < stage tolerance + minimum dwell |
-| **Objects** | 5 × YCB: sugar box, mustard bottle, tomato soup can, cracker box, DexCube |
-| **Container** | KLT bin (small), placed at table corner (0.55, −0.30) |
-| **Grasp metadata** | Per-object: grasp Z offset, yaw symmetry, yaw offset |
-| **Goal** | All objects inside bin (XY footprint + Z range check); no yaw/upright requirement |
-| **Episode** | ~35 s (5 objects × ~7 s budget each) |
-
-Object catalog (`mdp/object_assets.py`):
-
-| Scene name | USD | Grasp symmetry |
-|-----------|-----|----------------|
-| `object0` | `Props/YCB/Axis_Aligned_Physics/004_sugar_box.usd` | 180° (long axis) |
-| `object1` | `Props/YCB/Axis_Aligned_Physics/006_mustard_bottle.usd` | rotationally symmetric |
-| `object2` | `Props/YCB/Axis_Aligned_Physics/005_tomato_soup_can.usd` | rotationally symmetric |
-| `object3` | `Props/YCB/Axis_Aligned_Physics/003_cracker_box.usd` | 180° (long axis) |
-| `object4` | `Props/Blocks/DexCube/dex_cube_instanceable.usd` | 90° (square) |
-
-```bash
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-Play-v0
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-Play-v0 --video --video_length 600
-```
 
 ---
 
