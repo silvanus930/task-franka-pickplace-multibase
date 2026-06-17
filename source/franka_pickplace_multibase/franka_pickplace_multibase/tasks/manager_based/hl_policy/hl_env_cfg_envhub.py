@@ -8,18 +8,35 @@
 Loads a manipulation preset from the Nepher envhub and wires its scene
 (table, objects, lighting, workspace) into the HL policy environment.
 
-Multi-object sequential pick-and-place
---------------------------------------
-When the preset is a :class:`PickAndPlacePresetCfg` with a
-:class:`PrebakedScenarioStrategy`, this module:
+Three wiring paths are supported:
 
-* Sorts ``preset.objects`` by ``pick_order``.
-* Wires all object names into ``HLPoseCommandCfg.cube_names``.
-* Passes the strategy into the ``reset_objects_and_goals`` event.
-* Wires all object scene-entity configs into the
-  ``all_objects_reached_goals`` termination.
-* Falls back to single-object ``cube_reached_goal`` / ``reset_cube_and_goal_poses``
-  when the preset has no strategy (legacy / random-goal presets).
+Typed-scenario (``franka-pickplace-multibase-sample`` default)
+--------------------------------------------------------------
+When the preset exposes a :class:`TypedPrebakedScenarioStrategy` (detected
+via ``hasattr(strategy, 'get_active_indices')``):
+
+* All catalog object names are wired into ``HLPoseCommandCfg.cube_names``.
+* ``num_active`` is set so the command term enters typed mode.
+* ``reset_typed_objects_from_scenario`` event parks inactive objects and
+  places active ones each episode; updates per-env active-catalog indices
+  and goals.
+* ``all_objects_reached_goals`` is wired with ``typed_mode=True`` so it
+  uses per-env active indices to check only the active slots.
+* Grasp metadata lists (length ``num_catalog``, indexed by catalog) wired
+  from ``OBJECT_CATALOG`` in ``mdp.object_assets``.
+
+Standard multi-object (``franka-pickplace-base-sample``)
+--------------------------------------------------------
+When the preset has a :class:`PrebakedScenarioStrategy` (no
+``get_active_indices``):
+
+* Objects sorted by ``pick_order``; all names wired into ``cube_names``.
+* ``reset_objects_and_goals`` event used.
+* Standard ``all_objects_reached_goals`` (no typed_mode).
+
+Single-object fallback
+----------------------
+When the preset has no strategy (legacy / random-goal presets).
 
 Usage::
 
@@ -62,12 +79,15 @@ def _create_scene_class(base_class: type, name: str, **attrs: Any) -> type:
 def _build_envhub_scene(
     base_scene: InteractiveSceneCfg,
     preset: Any,
+    extra_attrs: dict[str, Any] | None = None,
 ) -> InteractiveSceneCfg:
     """Construct a ``LLSceneCfg``-based scene augmented with preset content.
 
     - Objects from ``preset.get_object_cfgs()`` are injected as new attrs.
     - Lights from ``preset.get_light_cfgs()`` override the default dome light.
     - Table from ``preset.get_table_cfg()`` overrides the default table (if set).
+    - ``extra_attrs`` — additional scene entities (e.g. container for the typed
+      pick-and-place path) merged after the preset objects.
     """
     attrs: dict[str, Any] = {}
 
@@ -81,6 +101,9 @@ def _build_envhub_scene(
     table_cfg = preset.get_table_cfg()
     if table_cfg is not None:
         attrs["table"] = table_cfg
+
+    if extra_attrs:
+        attrs.update(extra_attrs)
 
     SceneCls = _create_scene_class(LLSceneCfg, "PresetHLSceneCfg", **attrs)
     env_spacing = max(base_scene.env_spacing, getattr(preset, "env_spacing", 2.5))
@@ -108,7 +131,7 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         - Legacy ``reset_cube_and_goal_poses`` + ``cube_reached_goal`` path.
     """
 
-    env_id: str = "franka-pickplace-base-sample"
+    env_id: str = "franka-pickplace-multibase-sample"
     """Nepher envhub environment identifier."""
 
     scene_id: str | int = 0
@@ -135,17 +158,43 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         preset = load_scene(env_manifest, self.scene_id, category="manipulation")
         self._preset = preset
 
-        # ---- Scene ----
-        self.scene = _build_envhub_scene(self.scene, preset)
-
-        # ---- Detect preset type ----
-        objects = getattr(preset, "objects", []) or []
-        goals   = getattr(preset, "goals",   []) or []
+        # ---- Detect preset type early (needed for scene construction) ----
+        objects  = getattr(preset, "objects",  []) or []
+        goals    = getattr(preset, "goals",    []) or []
         strategy = getattr(preset, "position_strategy", None)
+        is_typed = (strategy is not None and len(objects) > 0
+                    and hasattr(strategy, "get_active_indices"))
+
+        # ---- Scene ----
+        # For the typed-scenario path (franka-pickplace-multibase-sample), this
+        # is still a container-drop task, so the KLT bin must be in the scene.
+        # For all other envhub paths the scene has no container.
+        extra_scene_attrs: dict[str, Any] | None = None
+        if is_typed:
+            from franka_pickplace_multibase.tasks.manager_based.hl_policy.mdp.object_assets import (
+                CONTAINER_CFG,
+                make_container_rigid_cfg,
+            )
+            extra_scene_attrs = {
+                "container": make_container_rigid_cfg("{ENV_REGEX_NS}/Container", CONTAINER_CFG),
+            }
+
+        self.scene = _build_envhub_scene(self.scene, preset, extra_attrs=extra_scene_attrs)
+
+        # For non-typed envhub paths the scene has no container → disable
+        # container-specific terminations inherited from HLTerminationsCfg.
+        # For the typed path the container IS present, so they remain active.
+        if not is_typed:
+            self.terminations.container_fell = None
+            self.terminations.container_displaced = None
 
         if strategy is not None and len(objects) > 0:
-            # Multi-object pick-and-place with PrebakedScenarioStrategy.
-            self._wire_multi_object(preset, objects, goals, strategy)
+            if is_typed:
+                # Typed-scenario path: N-type catalog, M active per episode.
+                self._wire_typed_multi_object(preset, objects, strategy)
+            else:
+                # Standard multi-object with PrebakedScenarioStrategy.
+                self._wire_multi_object(preset, objects, goals, strategy)
         else:
             # Legacy single-object fallback.
             self._wire_single_object(preset, objects, goals)
@@ -153,6 +202,121 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         # ---- Episode length ----
         if hasattr(preset, "max_episode_length_s"):
             self.episode_length_s = preset.max_episode_length_s
+
+    # ------------------------------------------------------------------
+    # Typed-scenario wiring (TypedPrebakedScenarioStrategy)
+    # ------------------------------------------------------------------
+
+    def _wire_typed_multi_object(self, preset, objects, strategy) -> None:
+        """Wire the typed-scenario path for franka-pickplace-multibase-sample.
+
+        This path keeps the **container-drop task** from the base ``HLEnvCfg``
+        (objects are dropped into the KLT bin), but uses an 8-type YCB catalog
+        where each of the 30 benchmark scenarios picks 5 active types and assigns
+        them deterministic spawn positions.
+
+        The container is already in the envhub scene (added in
+        ``_apply_envhub_preset`` before this method is called).  Container
+        terminations (``container_fell``, ``container_displaced``) inherited
+        from ``HLTerminationsCfg`` remain active.
+
+        Grasp metadata (indexed by catalog index, not pick slot) is read from
+        :data:`mdp.object_assets.OBJECT_CATALOG`.
+        """
+        from franka_pickplace_multibase.tasks.manager_based.hl_policy.mdp.object_assets import (
+            CONTAINER_CFG,
+            OBJECT_CATALOG,
+        )
+        from franka_pickplace_multibase.tasks.manager_based.hl_policy.hl_env_cfg import (
+            GOAL_POS_DEFAULT,
+            _DROP_Z_LOCAL,
+        )
+
+        num_active  = strategy.num_active
+        num_catalog = strategy.num_catalog
+
+        # Catalog names in catalog-index order (catalog_0 … catalog_N).
+        catalog_names = sorted(
+            [o.name for o in objects],
+            key=lambda n: int(n.split("_")[-1]),
+        )
+
+        # Grasp metadata indexed by catalog index (length = num_catalog = 8).
+        catalog_grasp_z   = [obj.grasp_z_offset              for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_grasp_sym = [obj.grasp_sym                   for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_grasp_yaw = [obj.effective_grasp_yaw_offset() for obj in OBJECT_CATALOG[:num_catalog]]
+
+        # ---- Commands: keep container-drop mode (same as base HLEnvCfg) ----
+        # container_drop=True is the default from HLCommandsCfg; do NOT set False.
+        self.commands.ee_pose.cube_names        = catalog_names
+        self.commands.ee_pose.num_active        = num_active
+        self.commands.ee_pose.goal_pos_defaults = [GOAL_POS_DEFAULT] * num_active
+        self.commands.ee_pose.grasp_z_offsets   = catalog_grasp_z
+        self.commands.ee_pose.grasp_syms        = catalog_grasp_sym
+        self.commands.ee_pose.grasp_yaw_offsets = catalog_grasp_yaw
+        # goal_pose_visualizer_cfg stays as _MARKER_CFG (container opening marker)
+
+        # ---- Events: typed-scenario object reset + container placement ----
+        _C = CONTAINER_CFG
+        self.events.reset_cube_and_goal_poses = EventTerm(
+            func=mdp.reset_typed_objects_from_scenario,
+            mode="reset",
+            params={
+                "all_object_cfgs":           [SceneEntityCfg(name) for name in catalog_names],
+                "scenario_strategy":         strategy,
+                "pose_cmd_name":             "ee_pose",
+                "parking_pos":               (20.0, 0.0, 0.5),
+                # Container pose is read per-env from scenarios.json; no
+                # runtime sampling parameters are needed here.
+                "container_cfg":             SceneEntityCfg("container"),
+                "container_interior_half_x": _C.interior_half_x,
+                "container_interior_half_y": _C.interior_half_y,
+                "container_drop_z_local":    _DROP_Z_LOCAL,
+            },
+        )
+
+        # ---- Terminations: container success (typed — check only active objects) ----
+        self.terminations.cube_at_goal = DoneTerm(
+            func=mdp.objects_in_container,
+            params={
+                "object_cfgs":                [SceneEntityCfg(name) for name in catalog_names],
+                "robot_cfg":                  SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"]),
+                "pose_cmd_name":              "ee_pose",
+                "container_cfg":              SceneEntityCfg("container"),
+                "container_pos_world_offset": (_C.pos[0], _C.pos[1], _C.pos[2]),
+                "container_interior_half_x":  _C.interior_half_x,
+                "container_interior_half_y":  _C.interior_half_y,
+                "grip_open_threshold":        0.8,
+                "success_dwell_s":            1.0,
+                "enable_log":                 True,
+                "typed_mode":                 True,
+                "num_active":                 num_active,
+            },
+        )
+
+        # cube_fell: monitor all catalog objects; parked ones at local z=0.5 are
+        # safely above the -0.05 threshold so they never trigger this term.
+        self.terminations.cube_fell = DoneTerm(
+            func=mdp.any_object_fell,
+            params={
+                "object_cfgs":    [SceneEntityCfg(name) for name in catalog_names],
+                "minimum_height": -0.05,
+            },
+        )
+
+        # object_dropped: use catalog names and typed active-object lookup.
+        self.terminations.object_dropped = DoneTerm(
+            func=mdp.object_dropped_mid_carry,
+            params={
+                "object_cfgs":       [SceneEntityCfg(name) for name in catalog_names],
+                "pose_cmd_name":     "ee_pose",
+                "drop_height_world": 0.10,
+                "enable_log":        True,
+            },
+        )
+        # container_fell and container_displaced remain active.
+        # Scenario spawn positions are validated against the fixed container
+        # position with 0.10 m clearance, so no physics ejection occurs on reset.
 
     # ------------------------------------------------------------------
     # Multi-object wiring (PickAndPlacePresetCfg + strategy)
@@ -214,6 +378,17 @@ class HLEnvCfg_Envhub(HLEnvCfg):
             params={
                 "object_cfgs":    [SceneEntityCfg(sorted_names[0])],
                 "minimum_height": -0.05,
+            },
+        )
+
+        # object_dropped: override to use preset object names (base uses object0..4).
+        self.terminations.object_dropped = DoneTerm(
+            func=mdp.object_dropped_mid_carry,
+            params={
+                "object_cfgs":       [SceneEntityCfg(name) for name in sorted_names],
+                "pose_cmd_name":     "ee_pose",
+                "drop_height_world": 0.10,
+                "enable_log":        True,
             },
         )
 
@@ -292,6 +467,17 @@ class HLEnvCfg_Envhub(HLEnvCfg):
             params={
                 "object_cfgs":    [SceneEntityCfg(primary_obj.name)],
                 "minimum_height": -0.05,
+            },
+        )
+
+        # object_dropped: override to use the actual object name (base uses object0..4).
+        self.terminations.object_dropped = DoneTerm(
+            func=mdp.object_dropped_mid_carry,
+            params={
+                "object_cfgs":       [SceneEntityCfg(primary_obj.name)],
+                "pose_cmd_name":     "ee_pose",
+                "drop_height_world": 0.10,
+                "enable_log":        True,
             },
         )
 

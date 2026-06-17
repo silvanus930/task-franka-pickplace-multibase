@@ -17,7 +17,10 @@ from isaaclab.utils.math import quat_from_euler_xyz
 
 from .commands import HLPoseCommand
 from .spawn_utils import sample_xyz_offsets
-from .object_assets import container_drop_slot_offsets_table, container_to_table_interior_half_extents
+from .object_assets import (
+    container_drop_slot_offsets_table,
+    container_to_table_interior_half_extents,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +223,144 @@ def _reset_object_to_pose(
     root_state[:, 7:]  = 0.0
 
     obj.write_root_state_to_sim(root_state, env_ids=env_ids)
+
+
+# ---------------------------------------------------------------------------
+# EnvHub typed-scenario path (franka-pickplace-multibase-sample)
+# ---------------------------------------------------------------------------
+
+
+def reset_typed_objects_from_scenario(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    all_object_cfgs: list[SceneEntityCfg],
+    scenario_strategy,
+    pose_cmd_name: str = "ee_pose",
+    parking_pos: tuple[float, float, float] = (20.0, 0.0, 0.5),
+    # Container params (optional).  When provided the container pose is read
+    # from the scenario and goals are set to the drop zone.
+    container_cfg: SceneEntityCfg | None = None,
+    container_interior_half_x: float = 0.14,
+    container_interior_half_y: float = 0.10,
+    container_drop_z_local: float = 0.13,
+) -> None:
+    """Reset catalog objects for one episode using :class:`TypedPrebakedScenarioStrategy`.
+
+    Parks the inactive catalog objects at ``parking_pos`` (robot-local frame,
+    far off-table) and teleports the active objects to their scenario spawn
+    positions.
+
+    When ``container_cfg`` is supplied the function also:
+
+    * Places the container at the pose defined in the scenario JSON
+      (``scenario["container"]["pos"]`` and ``scenario["container"]["rot"]``).
+    * Stores the container's episode-start world position and orientation on
+      ``env._hl_container_home_w`` / ``env._hl_container_home_quat`` for the
+      ``container_displaced`` termination.
+    * Overrides the episode goals with per-slot container drop positions.
+
+    When ``container_cfg`` is ``None`` (point-goal benchmarks), goals are read
+    directly from the scenario file.
+
+    Args:
+        env:                        The RL environment.
+        env_ids:                    Indices of environments being reset.
+        all_object_cfgs:            Scene entity configs for all C catalog objects
+                                    (``catalog_0`` … ``catalog_7``), in catalog order.
+        scenario_strategy:          A :class:`TypedPrebakedScenarioStrategy` instance.
+        pose_cmd_name:              Name of the :class:`HLPoseCommand` command term.
+        parking_pos:                Robot-local position for inactive objects (m).
+        container_cfg:              Scene entity config for the KLT bin.
+        container_interior_half_x:  Container interior half-extent x (m).
+        container_interior_half_y:  Container interior half-extent y (m).
+        container_drop_z_local:     Drop target Z in robot-local frame (rim Z + offset).
+    """
+    if env_ids.numel() == 0:
+        return
+
+    N   = env_ids.numel()
+    dev = env.device
+
+    # ------------------------------------------------------------------
+    # 1. Get per-catalog spawn positions (inactive slots → parking_pos).
+    # ------------------------------------------------------------------
+    spawn_pos_cat, spawn_rot_cat = scenario_strategy.get_catalog_spawns(env_ids, dev)
+    # spawn_pos_cat: (N, C, 3),  spawn_rot_cat: (N, C, 4)
+
+    # ------------------------------------------------------------------
+    # 2. Teleport all catalog objects to their scenario-assigned positions.
+    # ------------------------------------------------------------------
+    for c, obj_cfg in enumerate(all_object_cfgs):
+        _reset_object_to_pose(env, env_ids, obj_cfg, spawn_pos_cat[:, c], spawn_rot_cat[:, c])
+
+    pose_term = env.command_manager.get_term(pose_cmd_name)
+
+    # ------------------------------------------------------------------
+    # 3a. Container mode: place container at its scenario-defined pose,
+    #     then set drop-zone goals relative to that position.
+    # ------------------------------------------------------------------
+    if container_cfg is not None:
+        # Container pose is explicitly defined per scenario — no runtime
+        # randomisation.  This guarantees the pre-validated spawn clearance
+        # from scenarios.json always holds.
+        container_local_pos, container_rot = scenario_strategy.get_container_pose(env_ids, dev)
+        cx_l = container_local_pos[:, 0]   # (N,) robot-local X
+        cy_l = container_local_pos[:, 1]   # (N,) robot-local Y
+
+        _reset_object_to_pose(env, env_ids, container_cfg, container_local_pos, container_rot)
+
+        # Store episode-start world pose as reference for container_displaced.
+        if not hasattr(env, "_hl_container_home_w"):
+            env._hl_container_home_w    = torch.zeros(env.num_envs, 3, device=dev)
+        if not hasattr(env, "_hl_container_home_quat"):
+            env._hl_container_home_quat = torch.zeros(env.num_envs, 4, device=dev)
+            env._hl_container_home_quat[:, 0] = 1.0  # identity quaternion
+        origins = env.scene.env_origins[env_ids]
+        env._hl_container_home_w[env_ids]    = origins + container_local_pos
+        env._hl_container_home_quat[env_ids] = container_rot
+
+        # Build per-slot drop goals inside the bin.
+        M_active = scenario_strategy.num_active
+        half_table_x, half_table_y = container_to_table_interior_half_extents(
+            container_interior_half_x, container_interior_half_y
+        )
+        slot_offsets = container_drop_slot_offsets_table(M_active, half_table_x, half_table_y)
+
+        goal_pos_local = torch.zeros(N, M_active, 3, device=dev)
+        goal_rot_local = torch.zeros(N, M_active, 4, device=dev)
+        goal_rot_local[:, :, 0] = 1.0  # identity quaternion
+
+        # Rotate slot offsets by the container's yaw so goals align with the
+        # rotated interior.  The slot pattern is defined for a zero-yaw
+        # container; without this rotation, goals shift toward the container
+        # walls when the container is rotated (up to ±22.5° in scenarios),
+        # leaving only ~1 cm clearance and causing dropped objects to bounce.
+        # Play-v0 always places the container at yaw=0, so it is unaffected.
+        container_yaw = 2.0 * torch.atan2(container_rot[:, 3], container_rot[:, 0])  # (N,)
+        cos_yaw = torch.cos(container_yaw)  # (N,)
+        sin_yaw = torch.sin(container_yaw)  # (N,)
+
+        for m, (jx, jy) in enumerate(slot_offsets):
+            jx_rot = jx * cos_yaw - jy * sin_yaw  # (N,)
+            jy_rot = jx * sin_yaw + jy * cos_yaw  # (N,)
+            goal_pos_local[:, m, 0] = cx_l + jx_rot
+            goal_pos_local[:, m, 1] = cy_l + jy_rot
+            goal_pos_local[:, m, 2] = container_drop_z_local
+
+        pose_term.set_goals_from_strategy(env_ids, goal_pos_local, goal_rot_local)
+
+    # ------------------------------------------------------------------
+    # 3b. Point-goal mode: use goal positions from the scenario file.
+    # ------------------------------------------------------------------
+    else:
+        goal_pos, goal_rot = scenario_strategy.get_goals(env_ids, dev)
+        pose_term.set_goals_from_strategy(env_ids, goal_pos, goal_rot)
+
+    # ------------------------------------------------------------------
+    # 4. Update per-env active catalog indices (grasp-metadata selection).
+    # ------------------------------------------------------------------
+    active_indices = scenario_strategy.get_active_indices(env_ids, dev)  # (N, M_active)
+    pose_term.set_active_objects_from_typed_scenario(env_ids, active_indices)
 
 
 # ---------------------------------------------------------------------------

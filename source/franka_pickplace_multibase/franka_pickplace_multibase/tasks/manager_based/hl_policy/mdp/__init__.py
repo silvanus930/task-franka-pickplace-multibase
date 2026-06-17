@@ -40,6 +40,7 @@ from .events import (  # noqa: F401
     reset_cube_and_goal_poses,
     reset_objects_and_goals,
     reset_scattered_objects_into_container,
+    reset_typed_objects_from_scenario,
 )
 
 # HL-specific terminations

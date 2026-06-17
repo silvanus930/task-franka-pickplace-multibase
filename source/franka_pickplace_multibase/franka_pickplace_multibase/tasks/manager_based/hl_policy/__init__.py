@@ -16,10 +16,12 @@ Registered environments:
 ``Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0``
     Multi-base evaluation driven by a Nepher EnvHub preset: the scene
     (table, objects, lighting) is loaded from a preset identified by
-    ``env_id`` / ``scene_id``.  Supports heterogeneous object types
-    (rigid, deformable, articulated) and arbitrary goal configurations
-    defined in the preset.  Run via ``play.py`` or evaluated with
-    ``eval-nav``::
+    ``env_id`` / ``scene_id``.  Default preset is
+    ``franka-pickplace-multibase-sample`` — a 30-scenario typed benchmark
+    with an 8-type YCB catalog (5 objects active per episode), the
+    :class:`TypedPrebakedScenarioStrategy`, and per-episode object-type
+    variation.  Override ``env_id`` to use any other compatible preset
+    (e.g. ``franka-pickplace-base-sample``).  Run via ``play.py``::
 
         python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0
 

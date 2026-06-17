@@ -89,15 +89,23 @@ class HLPoseCommand(CommandTerm):
         ]
         self._M: int = len(self._cubes)
 
+        # Typed-scenario mode: num_active < M means each episode activates a
+        # subset of the catalog objects via _active_catalog_indices (N, M_active).
+        _num_active = cfg.num_active if (cfg.num_active > 0 and cfg.num_active < self._M) else self._M
+        self._typed_mode: bool = (_num_active < self._M)
+        self._M_active: int    = _num_active
+
         self.pose_command_b = torch.zeros(self.num_envs, 7, device=self.device)
         self.pose_command_b[:, 3] = 1.0
 
-        # Per-env per-object goal tensors (N, M, 3/4).
-        self.goal_pos_w  = torch.zeros(self.num_envs, self._M, 3, device=self.device)
-        self.goal_quat_w = torch.zeros(self.num_envs, self._M, 4, device=self.device)
+        # Per-env per-object goal tensors (N, M_active, 3/4).
+        # In typed mode M_active < M; in standard mode M_active == M.
+        self.goal_pos_w  = torch.zeros(self.num_envs, self._M_active, 3, device=self.device)
+        self.goal_quat_w = torch.zeros(self.num_envs, self._M_active, 4, device=self.device)
         self.goal_quat_w[:, :, 0] = 1.0
 
-        # Per-object grasp metadata tensors (M,) – broadcast to (N,) each step.
+        # Per-object grasp metadata tensors (M,) – indexed by catalog index in
+        # typed mode, or by pick-slot index in standard mode.
         M = self._M
         _pad = lambda lst, default: lst + [default] * max(0, M - len(lst))
         self._grasp_z_offsets  = torch.tensor(
@@ -109,6 +117,12 @@ class HLPoseCommand(CommandTerm):
         self._grasp_yaw_offsets = torch.tensor(
             _pad(cfg.grasp_yaw_offsets, cfg.grasp_yaw_offset_default), dtype=torch.float32, device=self.device
         )  # (M,)
+
+        # Per-env active catalog indices (N, M_active).
+        # Default: identity mapping — slot m uses catalog object m.
+        self._active_catalog_indices = torch.arange(
+            self._M_active, device=self.device
+        ).unsqueeze(0).expand(self.num_envs, -1).clone()  # (N, M_active)
 
         self._init_goals(torch.arange(self.num_envs, device=self.device))
 
@@ -123,7 +137,7 @@ class HLPoseCommand(CommandTerm):
         self.planner = PickPlacePlanner(
             num_envs          = self.num_envs,
             device            = self.device,
-            num_objects       = self._M,
+            num_objects       = self._M_active,
             hand_tcp_offset_z = cfg.hand_tcp_offset_z,
             pre_approach_z    = cfg.pre_approach_z,
             carry_z           = cfg.carry_z,
@@ -199,7 +213,7 @@ class HLPoseCommand(CommandTerm):
         """Initialise goal tensors from ``goal_pos_defaults`` and random yaw."""
         if env_ids.numel() == 0:
             return
-        for m in range(self._M):
+        for m in range(self._M_active):
             default = self.cfg.goal_pos_defaults[m] if m < len(self.cfg.goal_pos_defaults) else self.cfg.goal_pos_defaults[-1]
             base = torch.tensor(default, dtype=torch.float32, device=self.device)
             offsets = sample_xyz_offsets(env_ids.numel(), {
@@ -215,13 +229,27 @@ class HLPoseCommand(CommandTerm):
     def set_goals_from_strategy(
         self,
         env_ids: torch.Tensor,
-        goal_pos: torch.Tensor,   # (N, M, 3) robot-local frame
-        goal_rot: torch.Tensor,   # (N, M, 4) wxyz
+        goal_pos: torch.Tensor,   # (N, M_active, 3) robot-local frame
+        goal_rot: torch.Tensor,   # (N, M_active, 4) wxyz
     ) -> None:
         """Store per-env per-object goals supplied by a scenario strategy or scatter event."""
         origins = self._env.scene.env_origins[env_ids]  # (N, 3)
-        self.goal_pos_w[env_ids]  = origins.unsqueeze(1) + goal_pos
-        self.goal_quat_w[env_ids] = goal_rot
+        M = goal_pos.shape[1]
+        self.goal_pos_w[env_ids, :M]  = origins.unsqueeze(1) + goal_pos
+        self.goal_quat_w[env_ids, :M] = goal_rot
+
+    def set_active_objects_from_typed_scenario(
+        self,
+        env_ids: torch.Tensor,
+        active_catalog_indices: torch.Tensor,   # (N, M_active) long
+    ) -> None:
+        """Update per-env active catalog assignments for the typed-scenario path.
+
+        Called by ``reset_typed_objects_from_scenario`` after each episode reset.
+        ``active_catalog_indices[n, m]`` is the catalog object index (0–C-1)
+        that occupies pick slot ``m`` for environment ``n``.
+        """
+        self._active_catalog_indices[env_ids] = active_catalog_indices
 
     # ------------------------------------------------------------------
     # CommandTerm interface
@@ -242,15 +270,26 @@ class HLPoseCommand(CommandTerm):
 
     def _resample_command(self, env_ids: Sequence[int]) -> None:
         ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
-        # Grasp metadata for object-0 at reset (will be updated per step).
-        # Must be full N-size tensors so planner.reset() can index them with `ids`.
-        sym0     = self._grasp_syms[0].unsqueeze(0).expand(self.num_envs)
-        yaw_off0 = self._grasp_yaw_offsets[0].unsqueeze(0).expand(self.num_envs)
+        # Grasp metadata and initial cube orientation for slot 0 at reset.
+        # Full N-size tensors required so planner.reset() can index with `ids`.
+        if self._typed_mode:
+            # In typed mode, index by the catalog object assigned to slot 0.
+            arange_n = torch.arange(self.num_envs, device=self.device)
+            cat_idx_slot0 = self._active_catalog_indices[:, 0]  # (N,)
+            all_quats = torch.stack([c.data.root_quat_w for c in self._cubes], dim=1)
+            cube_quat_w = all_quats[arange_n, cat_idx_slot0]  # (N, 4)
+            sym0     = self._grasp_syms[cat_idx_slot0]          # (N,)
+            yaw_off0 = self._grasp_yaw_offsets[cat_idx_slot0]   # (N,)
+        else:
+            cube_quat_w = self._cubes[0].data.root_quat_w
+            sym0     = self._grasp_syms[0].unsqueeze(0).expand(self.num_envs)
+            yaw_off0 = self._grasp_yaw_offsets[0].unsqueeze(0).expand(self.num_envs)
+
         self.planner.reset(
             ids,
             ee_pos_w      = self.robot.data.body_pos_w[:,  self._body_idx],
             ee_quat_w     = self.robot.data.body_quat_w[:, self._body_idx],
-            cube_quat_w   = self._cubes[0].data.root_quat_w,
+            cube_quat_w   = cube_quat_w,
             grasp_sym     = sym0,
             grasp_yaw_off = yaw_off0,
         )
@@ -270,21 +309,33 @@ class HLPoseCommand(CommandTerm):
         ee_pos_w  = self.robot.data.body_pos_w[:,  self._body_idx]
         ee_quat_w = self.robot.data.body_quat_w[:, self._body_idx]
 
-        task_idx = self.planner._task_idx              # (N,)
+        task_idx = self.planner._task_idx              # (N,), values 0 to M_active-1
         arange   = torch.arange(self.num_envs, device=self.device)
 
-        cube_pos_all  = torch.stack([c.data.root_pos_w  for c in self._cubes], dim=1)  # (N, M, 3)
-        cube_quat_all = torch.stack([c.data.root_quat_w for c in self._cubes], dim=1)  # (N, M, 4)
+        if self._typed_mode:
+            # Gather positions/quaternions from ALL catalog objects.
+            all_pos  = torch.stack([c.data.root_pos_w  for c in self._cubes], dim=1)  # (N, C, 3)
+            all_quat = torch.stack([c.data.root_quat_w for c in self._cubes], dim=1)  # (N, C, 4)
+            # Map pick slot → catalog index for each env.
+            cat_for_task = self._active_catalog_indices[arange, task_idx]             # (N,)
+            current_cube_pos  = all_pos[arange,  cat_for_task]   # (N, 3)
+            current_cube_quat = all_quat[arange, cat_for_task]   # (N, 4)
+            # Grasp metadata indexed by catalog index (not pick slot).
+            cur_grasp_z_off   = self._grasp_z_offsets[cat_for_task]    # (N,)
+            cur_grasp_sym     = self._grasp_syms[cat_for_task]          # (N,)
+            cur_grasp_yaw_off = self._grasp_yaw_offsets[cat_for_task]  # (N,)
+        else:
+            cube_pos_all  = torch.stack([c.data.root_pos_w  for c in self._cubes], dim=1)  # (N, M, 3)
+            cube_quat_all = torch.stack([c.data.root_quat_w for c in self._cubes], dim=1)  # (N, M, 4)
+            current_cube_pos  = cube_pos_all[arange,  task_idx]
+            current_cube_quat = cube_quat_all[arange, task_idx]
+            # Grasp metadata indexed by pick slot.
+            cur_grasp_z_off   = self._grasp_z_offsets[task_idx]    # (N,)
+            cur_grasp_sym     = self._grasp_syms[task_idx]          # (N,)
+            cur_grasp_yaw_off = self._grasp_yaw_offsets[task_idx]  # (N,)
 
-        current_cube_pos  = cube_pos_all[arange,  task_idx]
-        current_cube_quat = cube_quat_all[arange, task_idx]
         current_goal_pos  = self.goal_pos_w[arange,  task_idx]
         current_goal_quat = self.goal_quat_w[arange, task_idx]
-
-        # Select per-object grasp metadata for current task_idx (broadcast M→N).
-        cur_grasp_z_off   = self._grasp_z_offsets[task_idx]    # (N,)
-        cur_grasp_sym     = self._grasp_syms[task_idx]          # (N,)
-        cur_grasp_yaw_off = self._grasp_yaw_offsets[task_idx]  # (N,)
 
         wrist_angle = self.robot.data.joint_pos[:, self._wrist_joint_idx]
         end_pos_w, end_quat_w, grip = self.planner.step(
@@ -349,7 +400,7 @@ class HLPoseCommand(CommandTerm):
             for i in torch.where(p._place_miss)[0].tolist():
                 _LOG.warning(
                     "[HL] env %d [obj %d/%d] place_miss  retry=%d/%d  -> re-pick",
-                    i, int(p._task_idx[i].item()), self._M - 1,
+                    i, int(p._task_idx[i].item()), self._M_active - 1,
                     p._place_retries[i].item(), p.max_place_retries,
                 )
 
@@ -358,7 +409,7 @@ class HLPoseCommand(CommandTerm):
             task_idx = int(p._task_idx[i].item())
             _LOG.info(
                 "[HL] env %d [obj %d/%d] stage -> %d %s  target_w=%s  ee_w=%s  grip=%.0f",
-                i, task_idx, self._M - 1,
+                i, task_idx, self._M_active - 1,
                 stage, STAGE_NAMES[stage], _fmt_xyz(self._target_pos_w[i]),
                 _fmt_xyz(ee_pos_w[i]), self._grip_command[i, 0].item(),
             )
@@ -371,7 +422,7 @@ class HLPoseCommand(CommandTerm):
             _LOG.warning(
                 "[HL] env %d [obj %d/%d] stuck  stage=%d %s  t=%.2fs  "
                 "pos_err=%.4f  ang_err=%.4f  (tol pos=%.3f ang=%.3f)  target_w=%s  ee_w=%s",
-                i, task_idx, self._M - 1,
+                i, task_idx, self._M_active - 1,
                 stage, STAGE_NAMES[stage], p._elapsed[i].item(),
                 p._pos_err[i].item(), p._ang_err[i].item(),
                 p._pos_tol_eff[i].item(), p._ang_tol_eff[i].item(),
@@ -387,12 +438,19 @@ class HLPoseCommand(CommandTerm):
             _LOG.info(
                 "[HL] env %d [obj %d/%d]  stage=%d %s  t=%.2fs  pos_err=%.4f  "
                 "ang_err=%.4f  track_ok=%d  retries=%d  cube_z=%.3f",
-                i, task_idx, self._M - 1,
+                i, task_idx, self._M_active - 1,
                 stage, STAGE_NAMES[stage], p._elapsed[i].item(),
                 p._pos_err[i].item(), p._ang_err[i].item(),
                 int(p._track_ok[i].item()), p._retry_count[i].item(),
-                self._cubes[task_idx].data.root_pos_w[i, 2].item(),
+                self._get_cube_z_w(i, task_idx),
             )
+
+    def _get_cube_z_w(self, env_idx: int, task_idx_val: int) -> float:
+        """Return the world-Z of the current task object for a given env (for logging)."""
+        if self._typed_mode:
+            cat_idx = int(self._active_catalog_indices[env_idx, task_idx_val].item())
+            return self._cubes[cat_idx].data.root_pos_w[env_idx, 2].item()
+        return self._cubes[task_idx_val].data.root_pos_w[env_idx, 2].item()
 
     def _goal_marker_pose_w(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Visualise the current task's goal (flat marker at table/bin height)."""
@@ -490,6 +548,12 @@ class HLPoseCommandCfg(CommandTermCfg):
 
     # Default goal positions per object.
     goal_pos_defaults: list[tuple[float, float, float]] = [(0.55, -0.30, 0.055)]
+
+    # Typed-scenario mode: set to a positive integer < len(cube_names) to enable.
+    # In typed mode, each episode only ``num_active`` of the ``len(cube_names)``
+    # catalog objects are active; the rest are parked by the reset event.
+    # ``0`` (default) disables typed mode: all cube_names objects are tracked.
+    num_active: int = 0
 
     # Goal marker
     table_surface_z: float = 0.03

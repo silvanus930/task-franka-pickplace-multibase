@@ -49,13 +49,13 @@ python play.py --task=Nepher-Franka-PickPlace-LL-Play-v0
 
 `Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0` — same LL checkpoint and planner, scene loaded from a Nepher manipulation preset (`HLEnvCfg_Envhub`, `env_id` / `scene_id`).
 
-Default preset `franka-pickplace-base-sample`: SeattleLabTable, 3 × DexCube, 30 deterministic scenarios (`env_id % 30`).
+Default preset `franka-pickplace-multibase-sample`: SeattleLabTable, 8-type YCB catalog (5 of 8 active per episode), 30 typed deterministic scenarios (`env_id % 30`).  Override with `--preset franka-pickplace-base-sample` to use the 3 × DexCube fixed-catalog preset.
 
 ```bash
 python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0
 ```
 
-Evaluated via `eval-nav/configs/task-franka-pickplace-multibase.yaml` (`num_envs: 30`, scoring v1).
+Evaluated via `eval-nav/configs/task-franka-pickplace-multibase.yaml` (`num_envs: 30`, `max_episode_steps: 1575`, `max_episode_time_s: 35.0`, scoring v2).
 
 ### Termination contract (eval-nav)
 

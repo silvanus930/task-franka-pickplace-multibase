@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
-from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg, RigidBodyPropertiesCfg
+from isaaclab.sim.schemas.schemas_cfg import (
+    MassPropertiesCfg,
+    RigidBodyPropertiesCfg,
+)
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import isaaclab.sim as sim_utils
 
@@ -124,8 +126,7 @@ class GraspObjectCfg:
 # Object catalog
 # ---------------------------------------------------------------------------
 
-# YCB dataset, Axis_Aligned_Physics: rigid-body physics properties pre-applied.
-_YCB = f"{ISAAC_NUCLEUS_DIR}/Props/YCB/Axis_Aligned_Physics"
+_YCB_P = f"{ISAAC_NUCLEUS_DIR}/Props/YCB/Axis_Aligned_Physics"  # physics-baked S3 subset
 
 OBJECT_CATALOG: list[GraspObjectCfg] = [
     # 004 sugar box – ~7 cm tall × 3.5 cm × 2.5 cm at 0.7 scale.
@@ -134,7 +135,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
     # span the narrow (local-X) face.  180° yaw symmetry.
     GraspObjectCfg(
         name="object0",
-        usd_path=f"{_YCB}/004_sugar_box.usd",
+        usd_path=f"{_YCB_P}/004_sugar_box.usd",
         scale=(0.7, 0.7, 0.7),
         grasp_z_offset=-0.03,
         grasp_sym=math.pi,
@@ -148,7 +149,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
     # footprint_xy equal → no auto π/2 adjustment.
     GraspObjectCfg(
         name="object1",
-        usd_path=f"{_YCB}/006_mustard_bottle.usd",
+        usd_path=f"{_YCB_P}/006_mustard_bottle.usd",
         scale=(0.7, 0.7, 0.7),
         grasp_z_offset=-0.04,
         grasp_sym=0.0,
@@ -162,7 +163,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
     # footprint_xy equal → no auto π/2 adjustment.
     GraspObjectCfg(
         name="object2",
-        usd_path=f"{_YCB}/005_tomato_soup_can.usd",
+        usd_path=f"{_YCB_P}/005_tomato_soup_can.usd",
         scale=(0.7, 0.7, 0.7),
         grasp_z_offset=-0.02,
         grasp_sym=0.0,
@@ -176,7 +177,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
     # footprint_xy: x < y → effective_grasp_yaw_offset adds π/2.  180° sym.
     GraspObjectCfg(
         name="object3",
-        usd_path=f"{_YCB}/003_cracker_box.usd",
+        usd_path=f"{_YCB_P}/003_cracker_box.usd",
         scale=(0.4, 0.4, 0.4),
         grasp_z_offset=-0.030,
         grasp_sym=math.pi,
@@ -344,6 +345,12 @@ _CONTAINER_RIGID_PROPS = RigidBodyPropertiesCfg(
 
 def make_object_rigid_cfg(prim_path: str, obj: GraspObjectCfg) -> RigidObjectCfg:
     """Build a :class:`RigidObjectCfg` for a catalog object.
+
+    All objects in :data:`OBJECT_CATALOG` use USDs that already carry
+    ``PhysicsRigidBodyAPI`` / ``PhysicsCollisionAPI`` / ``PhysicsMassAPI``
+    schemas (either from ``Axis_Aligned_Physics`` on S3, or from local USDA
+    wrapper files in ``assets/YCB_physics/``).  Only ``rigid_props`` (solver
+    tuning) is overridden here — the physics APIs come from the USD itself.
 
     Args:
         prim_path: Scene prim path template (e.g. ``"{ENV_REGEX_NS}/Object0"``).

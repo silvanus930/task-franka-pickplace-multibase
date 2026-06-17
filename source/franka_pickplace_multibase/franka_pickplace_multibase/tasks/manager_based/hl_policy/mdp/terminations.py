@@ -104,6 +104,8 @@ def objects_in_container(
     gripper_open_val: float = 0.04,
     success_dwell_s: float = 1.0,
     enable_log: bool = True,
+    typed_mode: bool = False,
+    num_active: int = 0,
 ) -> torch.Tensor:
     """Return ``True`` for each env where all objects have been placed in the container.
 
@@ -114,11 +116,18 @@ def objects_in_container(
     * Gripper is open (robot is not holding an object over the bin).
     * Condition held for ``success_dwell_s`` seconds continuously.
 
+    When ``typed_mode=True`` the function reads per-env active catalog indices
+    from the :class:`HLPoseCommand` term and checks only those ``num_active``
+    objects.  The remaining (parked) catalog objects are ignored, preventing
+    false negatives from objects parked far off-table.
+
     Args:
         env:                         The RL environment.
-        object_cfgs:                 Scene entity configs for all M objects.
+        object_cfgs:                 Scene entity configs for all objects (or all
+                                     catalog objects in typed mode).
         robot_cfg:                   Robot asset with finger joint IDs.
-        pose_cmd_name:               Unused; kept for backward-compatible call sites.
+        pose_cmd_name:               Name of the :class:`HLPoseCommand` term
+                                     (used in typed mode to fetch active indices).
         container_cfg:               Optional scene entity config for the container asset.
                                      When provided and the asset exposes ``data.root_pos_w``,
                                      the live container position is used for the XY check.
@@ -130,12 +139,19 @@ def objects_in_container(
         gripper_open_val:            Fully-open finger joint value (m).
         success_dwell_s:             Seconds the condition must hold before reset.
         enable_log:                  Print ``[HL] env N CONTAINER_SUCCESS`` on success.
+        typed_mode:                  When ``True``, check only the per-env active objects
+                                     (typed-scenario catalog path).
+        num_active:                  Number of active objects per episode (used when
+                                     ``typed_mode=True``).
 
     Returns:
         Boolean tensor ``(N,)``.
     """
+    from .commands import HLPoseCommand
+
     M = len(object_cfgs)
     robot: Articulation = env.scene[robot_cfg.name]
+    arange = torch.arange(env.num_envs, device=env.device)
 
     finger_pos = robot.data.joint_pos[:, robot_cfg.joint_ids]
     grip_open  = (finger_pos.mean(dim=-1) / gripper_open_val).clamp(0.0, 1.0)
@@ -161,14 +177,27 @@ def objects_in_container(
         container_interior_half_x, container_interior_half_y
     )
 
-    # Success is purely physical: gripper open AND every object inside the bin.
-    # The planner's internal DONE state is intentionally not required — success
-    # should fire as soon as all objects are physically confirmed in the container,
-    # regardless of which stage the planner is currently in.
+    # In typed mode gather all catalog positions once, then index by active slot.
+    if typed_mode and num_active > 0:
+        pose_term: HLPoseCommand = env.command_manager.get_term(pose_cmd_name)
+        active_idx = pose_term._active_catalog_indices  # (N, num_active)
+        all_pos_w = torch.stack(
+            [env.scene[cfg.name].data.root_pos_w for cfg in object_cfgs], dim=1
+        )  # (N, C, 3)
+        M_check = num_active
+    else:
+        active_idx = None
+        all_pos_w  = None
+        M_check    = M
+
+    # Success: gripper open AND every (active) object inside the bin footprint.
     all_in = grip_ok
-    for m in range(M):
-        obj = env.scene[object_cfgs[m].name]
-        pos = obj.data.root_pos_w   # (N, 3)
+    for m in range(M_check):
+        if active_idx is not None:
+            cat_m = active_idx[:, m]          # (N,) catalog index per env
+            pos   = all_pos_w[arange, cat_m]  # (N, 3)
+        else:
+            pos = env.scene[object_cfgs[m].name].data.root_pos_w   # (N, 3)
         dx = (pos[:, 0] - cx_w).abs()
         dy = (pos[:, 1] - cy_w).abs()
         in_xy = (dx < half_table_x) & (dy < half_table_y)
@@ -189,12 +218,18 @@ def objects_in_container(
     if enable_log and success.any():
         _ensure_log_configured()
         for i in torch.where(success)[0].tolist():
-            positions = ", ".join(
-                _fmt_pos(env.scene[object_cfgs[m].name].data.root_pos_w[i])
-                for m in range(M)
-            )
+            if active_idx is not None:
+                positions = ", ".join(
+                    _fmt_pos(all_pos_w[i, int(active_idx[i, m].item())])
+                    for m in range(M_check)
+                )
+            else:
+                positions = ", ".join(
+                    _fmt_pos(env.scene[object_cfgs[m].name].data.root_pos_w[i])
+                    for m in range(M)
+                )
             msg = (
-                f"[HL] env {i} CONTAINER_SUCCESS  M={M}  "
+                f"[HL] env {i} CONTAINER_SUCCESS  M={M_check}  "
                 f"object_positions=[{positions}]  "
                 f"grip={grip_open[i].item():.2f}  -> episode reset"
             )
@@ -295,12 +330,19 @@ def object_dropped_mid_carry(
     task_idx = planner._task_idx
     arange   = torch.arange(env.num_envs, device=env.device)
 
-    # Current task object's world Z.
+    # Stack Z values for all tracked objects (N, M) or (N, C) in typed mode.
     obj_z_all = torch.stack(
         [env.scene[cfg.name].data.root_pos_w[:, 2] for cfg in object_cfgs],
         dim=1,
     )  # (N, M)
-    cur_obj_z = obj_z_all[arange, task_idx]  # (N,)
+
+    # In typed mode task_idx is a pick-slot index (0..num_active-1); the
+    # physical object for that slot is given by the per-env active catalog index.
+    if getattr(pose_term, "_typed_mode", False):
+        active_cat = pose_term._active_catalog_indices[arange, task_idx]  # (N,)
+        cur_obj_z  = obj_z_all[arange, active_cat]  # (N,)
+    else:
+        cur_obj_z = obj_z_all[arange, task_idx]  # (N,)
 
     # Only check CARRY — during LIFT the object is still rising from the table
     # so its Z is legitimately below the threshold at the start of the stage.
@@ -411,32 +453,47 @@ def container_displaced(
     env: ManagerBasedRLEnv,
     container_cfg: SceneEntityCfg = SceneEntityCfg("container"),
     max_displacement: float = 0.02,
+    max_yaw_displacement: float = 0.1,
     enable_log: bool = True,
 ) -> torch.Tensor:
-    """Return ``True`` when the container has been pushed more than ``max_displacement`` m.
+    """Return ``True`` when the container has been pushed or rotated from its
+    scenario-defined initial pose.
 
-    The reference position is stored on ``env._hl_container_home_w`` by the
-    ``reset_scattered_objects_into_container`` event at the start of each
-    episode.  The check compares only the horizontal (XY) displacement so that
-    small Z settling of the rigid body on the table surface does not trigger
-    a false positive.
+    The reference state is stored on ``env._hl_container_home_w`` (position)
+    and ``env._hl_container_home_quat`` (orientation) by the reset event at
+    the start of each episode.  Both are set from the explicit container pose
+    recorded in ``scenarios.json``, so the check is always relative to the
+    per-scenario home.
+
+    Two conditions are tested independently; either alone triggers the
+    termination:
+
+    * **XY displacement** — horizontal distance between current and home
+      position exceeds ``max_displacement`` (default 2 cm).
+    * **Yaw rotation** — absolute yaw difference between current and home
+      orientation exceeds ``max_yaw_displacement`` (default 0.1 rad ≈ 5.7°).
+
+    Z settling of the rigid body on the table surface is ignored.
 
     .. note::
         This condition requires the container to be a **dynamic**
         ``RigidObjectCfg`` asset.  For a static ``AssetBaseCfg`` the pose
         never changes and the function always returns ``False``.  If the home
-        buffer has not been initialised yet (first step before reset), the
+        buffers have not been initialised yet (first step before reset), the
         function also returns ``False``.
 
     Args:
-        env:              The RL environment.
-        container_cfg:    Scene entity config for the container.
-        max_displacement: Horizontal distance threshold (m).  Default 0.02 m (2 cm).
-        enable_log:       Print a ``[HL] CONTAINER_DISPLACED`` warning when fired.
+        env:                  The RL environment.
+        container_cfg:        Scene entity config for the container.
+        max_displacement:     XY distance threshold (m).  Default 0.02 m.
+        max_yaw_displacement: Yaw angle threshold (rad).  Default 0.1 rad.
+        enable_log:           Print a warning when fired.
 
     Returns:
         Boolean tensor ``(N,)``.
     """
+    import math as _math
+
     container = env.scene[container_cfg.name]
 
     if not hasattr(container, "data") or not hasattr(container.data, "root_pos_w"):
@@ -445,22 +502,44 @@ def container_displaced(
     if not hasattr(env, "_hl_container_home_w"):
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-    pos_w = container.data.root_pos_w  # (N, 3)
-    home_w = env._hl_container_home_w  # (N, 3)
+    pos_w  = container.data.root_pos_w   # (N, 3)
+    home_w = env._hl_container_home_w    # (N, 3)
 
     dx = pos_w[:, 0] - home_w[:, 0]
     dy = pos_w[:, 1] - home_w[:, 1]
     dist_xy = torch.sqrt(dx * dx + dy * dy)
+    pos_displaced = dist_xy > max_displacement
 
-    displaced = dist_xy > max_displacement
+    # Yaw-displacement check (uses scenario-defined home orientation).
+    d_yaw        = torch.zeros(env.num_envs, device=env.device)
+    yaw_displaced = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if hasattr(env, "_hl_container_home_quat"):
+        def _extract_yaw(q: torch.Tensor) -> torch.Tensor:
+            w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+            return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+        quat_w   = container.data.root_quat_w          # (N, 4) wxyz
+        home_q   = env._hl_container_home_quat         # (N, 4) wxyz
+        yaw_cur  = _extract_yaw(quat_w)
+        yaw_home = _extract_yaw(home_q)
+        # Wrap difference to (-π, π].
+        d_yaw = torch.remainder(yaw_cur - yaw_home + _math.pi, 2.0 * _math.pi) - _math.pi
+        yaw_displaced = d_yaw.abs() > max_yaw_displacement
+
+    displaced = pos_displaced | yaw_displaced
 
     if enable_log and displaced.any():
         _ensure_log_configured()
         for i in torch.where(displaced)[0].tolist():
+            parts = []
+            if pos_displaced[i]:
+                parts.append(f"dist_xy={dist_xy[i].item():.4f}>{max_displacement:.4f}")
+            if yaw_displaced[i]:
+                parts.append(f"|d_yaw|={d_yaw[i].abs().item():.4f}>{max_yaw_displacement:.4f}")
             msg = (
                 f"[HL] env {i} CONTAINER_DISPLACED  "
-                f"dist_xy={dist_xy[i].item():.4f} > {max_displacement:.4f}"
-                f"  -> episode reset"
+                + "  ".join(parts)
+                + "  -> episode reset"
             )
             _LOG.warning(msg)
             print(msg, flush=True)
@@ -596,22 +675,41 @@ def all_objects_reached_goals(
     gripper_open_val: float = 0.04,
     success_dwell_s: float = 1.0,
     enable_log: bool = True,
+    typed_mode: bool = False,
+    num_active: int = 0,
 ) -> torch.Tensor:
-    """Return ``True`` when all M objects have been sequentially placed (EnvHub path).
+    """Return ``True`` when all active objects have been sequentially placed (EnvHub path).
 
     Retained for the EnvHub ``HLEnvCfg_Envhub`` path which uses point goals
     with yaw/upright requirements.
+
+    In **typed-scenario mode** (``typed_mode=True``, ``num_active > 0``), each
+    episode only ``num_active`` of the ``len(cube_cfgs)`` catalog objects are
+    tracked.  The active set is read from
+    ``pose_term._active_catalog_indices (N, num_active)``, and positions are
+    gathered per-env from the full catalog pose stack.
     """
     from ..classical_planner import Stage
     from .commands import HLPoseCommand
 
-    M = len(cube_cfgs)
     robot: Articulation = env.scene[robot_cfg.name]
     pose_term: HLPoseCommand = env.command_manager.get_term(pose_cmd_name)
+    planner  = pose_term.planner
+    stage    = planner.stage
+    task_idx = planner._task_idx
+    arange   = torch.arange(env.num_envs, device=env.device)
 
-    planner   = pose_term.planner
-    stage     = planner.stage
-    task_idx  = planner._task_idx
+    if typed_mode and num_active > 0:
+        # Typed path: per-env active catalog subset.
+        M = num_active
+        active_idx = pose_term._active_catalog_indices  # (N, M)
+        # Stack all catalog object positions / quaternions.
+        all_pos  = torch.stack([env.scene[c.name].data.root_pos_w  for c in cube_cfgs], dim=1)  # (N, C, 3)
+        all_quat = torch.stack([env.scene[c.name].data.root_quat_w for c in cube_cfgs], dim=1)  # (N, C, 4)
+    else:
+        M = len(cube_cfgs)
+        active_idx = None
+        all_pos = all_quat = None
 
     fully_done = (task_idx >= M - 1) & (stage >= int(Stage.DONE))
 
@@ -621,9 +719,14 @@ def all_objects_reached_goals(
 
     all_placed = fully_done & grip_ok
     for m in range(M):
-        cube_m = env.scene[cube_cfgs[m].name]
-        cube_pos_w  = cube_m.data.root_pos_w
-        cube_quat_w = cube_m.data.root_quat_w
+        if typed_mode and active_idx is not None:
+            cat_m = active_idx[:, m]                   # (N,) catalog index for slot m
+            cube_pos_w  = all_pos[arange,  cat_m]      # (N, 3)
+            cube_quat_w = all_quat[arange, cat_m]      # (N, 4)
+        else:
+            cube_m = env.scene[cube_cfgs[m].name]
+            cube_pos_w  = cube_m.data.root_pos_w
+            cube_quat_w = cube_m.data.root_quat_w
 
         goal_pos_w  = pose_term.goal_pos_w[:, m]
         goal_quat_w = pose_term.goal_quat_w[:, m]
@@ -655,10 +758,16 @@ def all_objects_reached_goals(
     if enable_log and success.any():
         _ensure_log_configured()
         for i in torch.where(success)[0].tolist():
-            positions = ", ".join(
-                _fmt_pos(env.scene[cube_cfgs[m].name].data.root_pos_w[i])
-                for m in range(M)
-            )
+            if typed_mode and active_idx is not None:
+                positions = ", ".join(
+                    _fmt_pos(all_pos[i, int(active_idx[i, m].item())])
+                    for m in range(M)
+                )
+            else:
+                positions = ", ".join(
+                    _fmt_pos(env.scene[cube_cfgs[m].name].data.root_pos_w[i])
+                    for m in range(M)
+                )
             msg = (
                 f"[HL] env {i} ALL_DONE  M={M}  "
                 f"cube_positions=[{positions}]  "

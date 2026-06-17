@@ -95,17 +95,24 @@ class HLSceneCfg(LLSceneCfg):
 # Helpers
 ##
 
-_OBJECT_NAMES: list[str] = [obj.name for obj in OBJECT_CATALOG]  # ["object0".."object4"]
+# HLSceneCfg spawns the first 5 catalog entries (object0–object4).
+# Slice here so commands, events, and terminations reference only objects
+# that exist in the scene; OBJECT_CATALOG may have more entries for use by
+# the typed-scenario envhub path (hl_env_cfg_envhub.py).
+_NUM_SCENE_OBJECTS: int = 5
+_SCENE_CATALOG = OBJECT_CATALOG[:_NUM_SCENE_OBJECTS]
+
+_OBJECT_NAMES: list[str] = [obj.name for obj in _SCENE_CATALOG]  # ["object0".."object4"]
 _M: int = len(_OBJECT_NAMES)
 
 # Per-object grasp metadata lists (aligned with _OBJECT_NAMES).
-_GRASP_Z_OFFSETS:   list[float] = [obj.grasp_z_offset              for obj in OBJECT_CATALOG]
-_GRASP_SYMS:        list[float] = [obj.grasp_sym                   for obj in OBJECT_CATALOG]
+_GRASP_Z_OFFSETS:   list[float] = [obj.grasp_z_offset              for obj in _SCENE_CATALOG]
+_GRASP_SYMS:        list[float] = [obj.grasp_sym                   for obj in _SCENE_CATALOG]
 # Use effective_grasp_yaw_offset() so objects with footprint_xy set automatically
 # receive a π/2 rotation when their short axis is along local X, aligning the
 # gripper fingers with the narrower dimension for a successful grasp.
-_GRASP_YAW_OFFSETS: list[float] = [obj.effective_grasp_yaw_offset() for obj in OBJECT_CATALOG]
-_FOOTPRINT_RADII:   list[float] = [obj.footprint_radius              for obj in OBJECT_CATALOG]
+_GRASP_YAW_OFFSETS: list[float] = [obj.effective_grasp_yaw_offset() for obj in _SCENE_CATALOG]
+_FOOTPRINT_RADII:   list[float] = [obj.footprint_radius              for obj in _SCENE_CATALOG]
 
 # Container drop marker config: visualise the bin opening as a blue rectangle.
 _TABLE_HALF_X, _TABLE_HALF_Y = CONTAINER_CFG.table_interior_half_extents()
