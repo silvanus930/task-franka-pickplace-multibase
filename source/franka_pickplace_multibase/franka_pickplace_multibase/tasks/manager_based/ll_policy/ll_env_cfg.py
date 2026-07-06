@@ -95,7 +95,7 @@ class LLSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class CommandsCfg:
-    """EE pose target (resampled mid-episode) and gripper target (per-episode)."""
+    """EE pose target and gripper target (both resampled mid-episode)."""
 
     ee_pose = mdp.UniformPoseCommandCfg(
         asset_name="robot",
@@ -114,10 +114,9 @@ class CommandsCfg:
         ),
     )
 
-    # Resampled only at episode reset (timer set far beyond any episode length).
-    # close_prob=0.5: 50 % of episodes command open, 50 % command close.
+    # Resampled every 1–2 s so the LL policy learns open/close transitions needed by HL.
     grip_cmd = mdp.GripperCommandCfg(
-        resampling_time_range=(1.0e6, 1.0e6),
+        resampling_time_range=(1.0, 2.0),
         close_prob=0.5,
     )
 

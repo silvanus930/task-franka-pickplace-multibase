@@ -79,7 +79,10 @@ class EvalCompatEnv:
                     success = success | tm.get_term(term_name).bool()
             return success
         except (AttributeError, KeyError):
-            return torch.zeros(1, dtype=torch.bool)
+            base_env = getattr(self._env, "unwrapped", self._env)
+            num_envs = getattr(base_env, "num_envs", 1)
+            device = getattr(base_env, "device", "cpu")
+            return torch.zeros(num_envs, dtype=torch.bool, device=device)
 
     @property
     def task_failed(self) -> torch.Tensor:
@@ -114,7 +117,10 @@ class EvalCompatEnv:
                     failure = failure | tm.get_term(term_name).bool()
             return failure
         except (AttributeError, KeyError):
-            return torch.zeros(1, dtype=torch.bool)
+            base_env = getattr(self._env, "unwrapped", self._env)
+            num_envs = getattr(base_env, "num_envs", 1)
+            device = getattr(base_env, "device", "cpu")
+            return torch.zeros(num_envs, dtype=torch.bool, device=device)
 
     # ------------------------------------------------------------------
     # Gym interface pass-through

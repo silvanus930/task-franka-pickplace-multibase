@@ -71,6 +71,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import franka_pickplace_multibase.tasks  # noqa: F401
 
+import policy_paths  # isort: skip
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
@@ -90,7 +92,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    log_root_path = policy_paths.log_root_path(agent_cfg.experiment_name)
     print(f"[INFO] Logging experiment to: {log_root_path}")
 
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

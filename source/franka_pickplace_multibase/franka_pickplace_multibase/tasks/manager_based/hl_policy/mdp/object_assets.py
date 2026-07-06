@@ -96,6 +96,21 @@ class GraspObjectCfg:
     footprint_radius: float = 0.05
     """Approximate object footprint radius (m) for non-overlap scatter."""
 
+    upright_height: float = 0.0
+    """Nominal standing height (m) after scale, used to detect lying/tipped poses.
+
+    When ``0.0`` the planner keeps the legacy top-down grasp-Z behaviour for
+    this object.  Set for tall objects (bottles, boxes) so the HL planner can
+    adjust grasp depth when the object is not upright.
+    """
+
+    grasp_offset_local: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Object-frame offset (m) from root centre to the preferred grasp aim point.
+
+    When ``(0, 0, 0)`` the planner aims at the object root centre (legacy).
+    Non-zero values are rotated into world frame via the object quaternion.
+    """
+
     # ---- Spawn ----
     default_pos: tuple[float, float, float] = (0.45, 0.0, 0.055)
     """Default world-local position used for scene initialisation."""
@@ -142,6 +157,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
         grasp_yaw_offset=0.0,
         footprint_xy=(0.025, 0.035),  # local x=2.5 cm (short), local y=3.5 cm (long)
         footprint_radius=0.04,
+        upright_height=0.05,
         default_pos=(0.60, 0.10, 0.05),
     ),
     # 006 mustard bottle – ~13 cm tall × ~3.5 cm diam at 0.7 scale.
@@ -156,6 +172,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
         grasp_yaw_offset=0.0,
         footprint_xy=(0.035, 0.035),  # circular footprint
         footprint_radius=0.03,
+        upright_height=0.09,
         default_pos=(0.75, -0.10, 0.065),
     ),
     # 005 tomato soup can – ~7 cm tall × ~4.8 cm diam at 0.7 scale.
@@ -170,6 +187,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
         grasp_yaw_offset=0.0,
         footprint_xy=(0.048, 0.048),  # circular footprint
         footprint_radius=0.03,
+        upright_height=0.05,
         default_pos=(0.70, 0.15, 0.04),
     ),
     # 003 cracker box – ~12.9 cm × 9.0 cm × 3.6 cm at 0.6 scale (reduced from 0.7).
@@ -184,6 +202,7 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
         grasp_yaw_offset=0.0,
         footprint_xy=(0.036, 0.090),  # local x=3.6 cm (short), local y=9.0 cm (long)
         footprint_radius=0.040,
+        upright_height=0.052,
         default_pos=(0.65, -0.15, 0.050),
     ),
     # DexCube – ~2.2 cm cube at 0.55 scale.

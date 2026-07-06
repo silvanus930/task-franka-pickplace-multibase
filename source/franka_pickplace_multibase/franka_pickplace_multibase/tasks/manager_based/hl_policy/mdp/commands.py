@@ -57,7 +57,15 @@ from .spawn_utils import sample_xyz_offsets
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+_ORIENT_LABELS = ("unknown", "upright", "lying")
+
 _LOG = logging.getLogger(__name__)
+
+
+def _orient_label(state: int) -> str:
+    if 0 <= state < len(_ORIENT_LABELS):
+        return _ORIENT_LABELS[state]
+    return "unknown"
 
 
 class HLPoseCommand(CommandTerm):
@@ -117,6 +125,15 @@ class HLPoseCommand(CommandTerm):
         self._grasp_yaw_offsets = torch.tensor(
             _pad(cfg.grasp_yaw_offsets, cfg.grasp_yaw_offset_default), dtype=torch.float32, device=self.device
         )  # (M,)
+        self._upright_heights = torch.tensor(
+            _pad(cfg.upright_heights, cfg.upright_height_default), dtype=torch.float32, device=self.device
+        )  # (M,)
+        _pad_vec = lambda lst, default: lst + [default] * max(0, M - len(lst))
+        self._grasp_offset_locals = torch.tensor(
+            _pad_vec(cfg.grasp_offset_locals, cfg.grasp_offset_local_default),
+            dtype=torch.float32,
+            device=self.device,
+        )  # (M, 3)
 
         # Per-env active catalog indices (N, M_active).
         # Default: identity mapping — slot m uses catalog object m.
@@ -324,6 +341,8 @@ class HLPoseCommand(CommandTerm):
             cur_grasp_z_off   = self._grasp_z_offsets[cat_for_task]    # (N,)
             cur_grasp_sym     = self._grasp_syms[cat_for_task]          # (N,)
             cur_grasp_yaw_off = self._grasp_yaw_offsets[cat_for_task]  # (N,)
+            cur_upright_h     = self._upright_heights[cat_for_task]    # (N,)
+            cur_grasp_off_loc = self._grasp_offset_locals[cat_for_task]  # (N, 3)
         else:
             cube_pos_all  = torch.stack([c.data.root_pos_w  for c in self._cubes], dim=1)  # (N, M, 3)
             cube_quat_all = torch.stack([c.data.root_quat_w for c in self._cubes], dim=1)  # (N, M, 4)
@@ -333,6 +352,11 @@ class HLPoseCommand(CommandTerm):
             cur_grasp_z_off   = self._grasp_z_offsets[task_idx]    # (N,)
             cur_grasp_sym     = self._grasp_syms[task_idx]          # (N,)
             cur_grasp_yaw_off = self._grasp_yaw_offsets[task_idx]  # (N,)
+            cur_upright_h     = self._upright_heights[task_idx]    # (N,)
+            cur_grasp_off_loc = self._grasp_offset_locals[task_idx]  # (N, 3)
+
+        finger_joint_ids = self.robot.find_joints("panda_finger_joint.*")[0]
+        finger_open = self.robot.data.joint_pos[:, finger_joint_ids].mean(dim=-1)
 
         current_goal_pos  = self.goal_pos_w[arange,  task_idx]
         current_goal_quat = self.goal_quat_w[arange, task_idx]
@@ -350,6 +374,9 @@ class HLPoseCommand(CommandTerm):
             grasp_z_off   = cur_grasp_z_off,
             grasp_sym     = cur_grasp_sym,
             grasp_yaw_off = cur_grasp_yaw_off,
+            upright_height = cur_upright_h,
+            grasp_offset_local = cur_grasp_off_loc,
+            finger_open   = finger_open,
         )
 
         end_pos_b, end_quat_b = subtract_frame_transforms(
@@ -377,6 +404,17 @@ class HLPoseCommand(CommandTerm):
         self.metrics["stage_elapsed_s"]   = p._elapsed
         self.metrics["retry_count"]       = p._retry_count.float()
         self.metrics["task_idx"]          = p._task_idx.float()
+        self.metrics["objects_placed"]    = p._object_placed.sum(dim=1).float()
+        self.metrics["objects_deferred"]  = p._object_deferred.sum(dim=1).float()
+        self.metrics["objects_abandoned"] = p._object_abandoned.sum(dim=1).float()
+        self.metrics["grasp_orient_state"] = p._grasp_orient_state.float()
+        self.metrics["grasp_z_eff"]       = p._cur_grasp_z_eff
+        self.metrics["grasp_verify_xy"]    = p._grasp_verify_xy_ok.float()
+        self.metrics["grasp_verify_finger"] = p._grasp_verify_finger_ok.float()
+        self.metrics["aim_offset_norm"]     = p._aim_offset_norm
+        self.metrics["aim_error_xy"]        = p._aim_error_xy
+        self.metrics["secure_error_xy"]     = p._secure_error_xy
+        self.metrics["used_corrected_aim_for_verify"] = p._used_corrected_aim_for_verify.float()
 
         if self.cfg.enable_log and self._step_count % self.cfg.log_interval == 0:
             self._log_status_snapshot()
@@ -391,19 +429,58 @@ class HLPoseCommand(CommandTerm):
         if p._grasp_miss.any():
             finger_pos = self.robot.data.joint_pos[:, self.robot.find_joints("panda_finger_joint.*")[0]]
             finger_open = finger_pos.mean(dim=-1)
-            cube_to_ee_xy = torch.norm(current_cube_pos[:, :2] - ee_pos_w[:, :2], dim=-1)
             for i in torch.where(p._grasp_miss)[0].tolist():
                 cz = current_cube_pos[i, 2].item()
+                if p._skip_event[i]:
+                    action = "abandon" if p._object_abandoned[i].any() else "defer"
+                    _LOG.warning(
+                        "[HL] env %d grasp_exhausted  obj=%d  retry=%d/%d  -> %s next object",
+                        i,
+                        int(p._task_idx[i].item()),
+                        int(p._retry_count[i].item()),
+                        p.max_retries,
+                        action,
+                    )
+                    continue
+                orient = _orient_label(int(p._grasp_orient_state[i].item()))
+                reasons: list[str] = []
+                if not bool(p._grasp_verify_xy_ok[i].item()):
+                    reasons.append("xy_miss")
+                if not bool(p._grasp_verify_finger_ok[i].item()):
+                    reasons.append("finger_miss")
+                reason_txt = ",".join(reasons) if reasons else "hold_timeout"
                 _LOG.warning(
-                    "[HL] env %d grasp_miss  cube_z=%.3f < %.3f  "
-                    "finger_open=%.4f  cube_to_ee_xy=%.4f  retry=%d/%d  -> PRE_GRASP",
+                    "[HL] env %d grasp_miss  obj=%d  orient=%s  "
+                    "upright_h=%.3f  z_eff=%.4f  z_base=%.4f  "
+                    "finger_open=%.4f  secure_err_xy=%.4f  aim_err_xy=%.4f  "
+                    "verify_corrected=%d  reason=%s  retry=%d/%d  -> PRE_GRASP",
                     i,
-                    cz,
-                    p.min_carry_cube_z,
+                    int(p._task_idx[i].item()),
+                    orient,
+                    float(p._cur_upright_height[i].item()),
+                    float(p._cur_grasp_z_eff[i].item()),
+                    float(p._cur_grasp_z_off[i].item()),
                     finger_open[i].item(),
-                    cube_to_ee_xy[i].item(),
+                    p._secure_error_xy[i].item(),
+                    p._aim_error_xy[i].item(),
+                    int(p._used_corrected_aim_for_verify[i].item()),
+                    reason_txt,
                     p._retry_count[i].item(),
                     p.max_retries,
+                )
+
+        if p._skip_event.any():
+            for i in torch.where(p._skip_event)[0].tolist():
+                placed = int(p._object_placed[i].sum().item())
+                deferred = int(p._object_deferred[i].sum().item())
+                abandoned = int(p._object_abandoned[i].sum().item())
+                _LOG.info(
+                    "[HL] env %d skip_schedule  placed=%d deferred=%d abandoned=%d  next_obj=%d",
+                    i,
+                    placed,
+                    deferred,
+                    abandoned,
+                    int(p._task_idx[i].item()),
                 )
 
         if p._place_miss.any():
@@ -449,12 +526,26 @@ class HLPoseCommand(CommandTerm):
             task_idx = int(p._task_idx[i].item())
             _LOG.info(
                 "[HL] env %d [obj %d/%d]  stage=%d %s  t=%.2fs  pos_err=%.4f  "
-                "ang_err=%.4f  track_ok=%d  retries=%d  cube_z=%.3f",
+                "ang_err=%.4f  track_ok=%d  retries=%d  cube_z=%.3f  "
+                "orient=%s  upright_h=%.3f  z_eff=%.4f  grasp_xy=%d  grasp_finger=%d  "
+                "aim_off=%.4f  aim_err_xy=%.4f  secure_err_xy=%.4f  verify_corrected=%d  "
+                "center_xy=(%.3f,%.3f)  grasp_aim_xy=(%.3f,%.3f)",
                 i, task_idx, self._M_active - 1,
                 stage, STAGE_NAMES[stage], p._elapsed[i].item(),
                 p._pos_err[i].item(), p._ang_err[i].item(),
                 int(p._track_ok[i].item()), p._retry_count[i].item(),
                 self._get_cube_z_w(i, task_idx),
+                _orient_label(int(p._grasp_orient_state[i].item())),
+                p._cur_upright_height[i].item(),
+                p._cur_grasp_z_eff[i].item(),
+                int(p._grasp_verify_xy_ok[i].item()),
+                int(p._grasp_verify_finger_ok[i].item()),
+                p._aim_offset_norm[i].item(),
+                p._aim_error_xy[i].item(),
+                p._secure_error_xy[i].item(),
+                int(p._used_corrected_aim_for_verify[i].item()),
+                p._object_center_xy[i, 0].item(), p._object_center_xy[i, 1].item(),
+                p._grasp_aim_xy[i, 0].item(), p._grasp_aim_xy[i, 1].item(),
             )
 
     def _get_cube_z_w(self, env_idx: int, task_idx_val: int) -> float:
@@ -576,11 +667,15 @@ class HLPoseCommandCfg(CommandTermCfg):
     grasp_z_offsets:    list[float] = []   # TCP below object centre at grasp (m)
     grasp_syms:         list[float] = []   # grasp yaw symmetry (rad); 0=rotationally symmetric
     grasp_yaw_offsets:  list[float] = []   # constant yaw offset (rad)
+    upright_heights:    list[float] = []   # nominal standing height (m); 0 disables lying adjust
+    grasp_offset_locals: list[tuple[float, float, float]] = []  # object-frame grasp aim offset (m)
 
     # Scalar defaults used when the per-object lists are shorter than M.
     grasp_z_offset_default:   float = -0.01
     grasp_sym_default:        float = math.pi / 2
     grasp_yaw_offset_default: float = 0.0
+    upright_height_default:   float = 0.0
+    grasp_offset_local_default: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Container drop mode: disables yaw gate; goal Z = bin rim target.
     container_drop: bool = False

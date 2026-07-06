@@ -112,6 +112,8 @@ _GRASP_SYMS:        list[float] = [obj.grasp_sym                   for obj in _S
 # receive a π/2 rotation when their short axis is along local X, aligning the
 # gripper fingers with the narrower dimension for a successful grasp.
 _GRASP_YAW_OFFSETS: list[float] = [obj.effective_grasp_yaw_offset() for obj in _SCENE_CATALOG]
+_UPRIGHT_HEIGHTS:   list[float] = [obj.upright_height              for obj in _SCENE_CATALOG]
+_GRASP_OFFSET_LOCALS: list[tuple[float, float, float]] = [obj.grasp_offset_local for obj in _SCENE_CATALOG]
 _FOOTPRINT_RADII:   list[float] = [obj.footprint_radius              for obj in _SCENE_CATALOG]
 
 # Container drop marker config: visualise the bin opening as a blue rectangle.
@@ -155,6 +157,8 @@ class HLCommandsCfg:
         grasp_z_offsets=_GRASP_Z_OFFSETS,
         grasp_syms=_GRASP_SYMS,
         grasp_yaw_offsets=_GRASP_YAW_OFFSETS,
+        upright_heights=_UPRIGHT_HEIGHTS,
+        grasp_offset_locals=_GRASP_OFFSET_LOCALS,
         # Container drop mode: goal Z = rim + offset; no yaw gate.
         container_drop=True,
         container_retract_xy_offset=_C.retract_xy_offset_table,

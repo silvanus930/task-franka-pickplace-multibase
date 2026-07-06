@@ -246,6 +246,8 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         catalog_grasp_z   = [obj.grasp_z_offset              for obj in OBJECT_CATALOG[:num_catalog]]
         catalog_grasp_sym = [obj.grasp_sym                   for obj in OBJECT_CATALOG[:num_catalog]]
         catalog_grasp_yaw = [obj.effective_grasp_yaw_offset() for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_upright   = [obj.upright_height              for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_grasp_off = [obj.grasp_offset_local           for obj in OBJECT_CATALOG[:num_catalog]]
 
         # ---- Commands: keep container-drop mode (same as base HLEnvCfg) ----
         # container_drop=True is the default from HLCommandsCfg; do NOT set False.
@@ -255,6 +257,8 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         self.commands.ee_pose.grasp_z_offsets   = catalog_grasp_z
         self.commands.ee_pose.grasp_syms        = catalog_grasp_sym
         self.commands.ee_pose.grasp_yaw_offsets = catalog_grasp_yaw
+        self.commands.ee_pose.upright_heights   = catalog_upright
+        self.commands.ee_pose.grasp_offset_locals = catalog_grasp_off
         # goal_pose_visualizer_cfg stays as _MARKER_CFG (container opening marker)
 
         # ---- Events: typed-scenario object reset + container placement ----

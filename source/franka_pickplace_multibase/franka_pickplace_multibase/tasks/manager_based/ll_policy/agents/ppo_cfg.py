@@ -31,7 +31,7 @@ class LLPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 200
     experiment_name = "franka_ll_ee_tracking"
     run_name = ""
-    resume = True
+    resume = False
     load_run = ".*"
     load_checkpoint = "model_.*.pt"
 

@@ -24,15 +24,22 @@ Franka Panda (7-DOF + gripper)
 python -m pip install -e source/franka_pickplace_multibase
 ```
 
-## Train
+For EnvHub / multi-base HL evaluation (`EnvhubPlay`, `EnvhubSafePlay`), also install Nepher:
 
 ```bash
-cd scripts/rsl_rl
-python train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --num_envs 4096
-python train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --resume
+pip install nepher
 ```
 
-Checkpoints → `logs/rsl_rl/franka_ll_ee_tracking/<timestamp>/`.
+## Train
+
+Run from the project root (or `cd scripts/rsl_rl` — logs always resolve to the project root):
+
+```bash
+python scripts/rsl_rl/train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --num_envs 4096
+python scripts/rsl_rl/train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --resume
+```
+
+Checkpoints → `logs/rsl_rl/franka_ll_ee_tracking/<timestamp>/` (project root).
 
 For HL pick-and-place, the LL policy must track wrist orientation accurately;
 position-only reaching is not enough to secure grasps. After SafePlay reports
@@ -40,15 +47,13 @@ position-only reaching is not enough to secure grasps. After SafePlay reports
 weighted reward config:
 
 ```bash
-cd scripts/rsl_rl
-python train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --num_envs 4096 --max_iterations 5000 --run_name ll_orientation_grasp_v1
+python scripts/rsl_rl/train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --num_envs 4096 --max_iterations 5000 --run_name ll_orientation_grasp_v1
 ```
 
 ## Evaluate (LL)
 
 ```bash
-cd scripts/rsl_rl
-python play.py --task=Nepher-Franka-PickPlace-LL-Play-v0
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-LL-Play-v0
 ```
 
 `play.py` copies the latest checkpoint into `best_policy/best_policy.pt` and exports TorchScript + ONNX to `best_policy/exported/` for HL use.
@@ -62,8 +67,7 @@ failures active, relaxes incidental container displacement, runs one env by
 default, and reports true success/failure/timeout metrics instead of PPO reward.
 
 ```bash
-cd scripts/rsl_rl
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --headless --max_episodes 5 --max_steps 1500
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --headless --max_episodes 5 --max_steps 1500
 ```
 
 Only move to the strict benchmark task after SafePlay can complete episodes
@@ -71,16 +75,14 @@ without repeated `PRE_GRASP stuck`, `object_dropped`, or `container_fell`
 failures.
 
 ```bash
-cd scripts/rsl_rl
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0 --headless --num_envs 30 --max_episodes 90
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0 --headless --num_envs 30 --max_episodes 90
 ```
 
 For video recording in headless mode, pass `--video`; `play.py` automatically
 enables cameras for Isaac Lab rendering.
 
 ```bash
-cd scripts/rsl_rl
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --headless --video --video_length 300
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --headless --video --video_length 300
 ```
 
 ## Multi-Base Integration (EnvHub)
@@ -90,8 +92,8 @@ python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --h
 Default preset `franka-pickplace-multibase-sample`: SeattleLabTable, 8-type YCB catalog (5 of 8 active per episode), 30 typed deterministic scenarios (`env_id % 30`). Override with `--preset franka-pickplace-base-sample` to use the 3 × DexCube fixed-catalog preset.
 
 ```bash
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0
-python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0 --preset franka-pickplace-base-sample
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0 --preset franka-pickplace-base-sample
 ```
 
 Evaluated via `eval-nav/configs/task-franka-pickplace-multibase.yaml` (`num_envs: 30`, `max_episode_steps: 1575`, `max_episode_time_s: 35.0`, scoring v2).

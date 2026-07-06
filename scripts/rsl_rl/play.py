@@ -177,7 +177,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                     term_done = termination_manager.get_term(term_name).bool()
                     if "goal" in lower or "success" in lower or "complete" in lower:
                         success |= term_done
-                    if "fell" in lower or "drop" in lower or "fail" in lower or "displace" in lower or "container" in lower:
+                    if "fell" in lower or "drop" in lower or "fail" in lower or "displace" in lower or "unsafe" in lower:
                         failure |= term_done
                     if "drop" in lower:
                         drop |= term_done
