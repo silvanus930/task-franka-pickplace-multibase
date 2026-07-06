@@ -49,3 +49,6 @@ from .rewards import (  # noqa: F401
     gripper_command_tracking,
     orientation_command_error_tanh,
 )
+
+# Custom curriculum terms.
+from .curriculums import override_pose_z_range  # noqa: F401
