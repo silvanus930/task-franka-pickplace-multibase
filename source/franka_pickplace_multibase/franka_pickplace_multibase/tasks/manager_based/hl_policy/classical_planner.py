@@ -507,7 +507,15 @@ class PickPlacePlanner:
             | (self._pre_settle >= 3.0 * pre_settle_req)
         )
 
-        grasp_ok   = in_grasp   & (self._elapsed >= self.min_stage_dur + self.grasp_hold_s)   & track_ok & grasp_secure
+        grasp_hold_done = self._elapsed >= self.min_stage_dur + self.grasp_hold_s
+        grasp_ok = in_grasp & grasp_hold_done & track_ok & grasp_secure
+        grasp_pos_escape = (
+            in_grasp
+            & grasp_hold_done
+            & (self._elapsed >= self.min_stage_dur + self.grasp_hold_s + self.stage_escape_s * hurry_mul)
+            & (pos_err < pos_tol_eff)
+            & grasp_secure
+        )
         release_ok = in_release & (self._elapsed >= self.min_stage_dur + self.release_hold_s) & track_ok
 
         # LOWER: in container mode just use a time-based settle (no yaw gate).
@@ -527,7 +535,7 @@ class PickPlacePlanner:
             lower_ok  = in_lower & track_ok & ((lower_min & (pred_yaw_err < self.place_yaw_gate)) | lower_cap)
 
         can_advance = at_end.clone()
-        can_advance = torch.where(in_grasp,   grasp_ok,   can_advance)
+        can_advance = torch.where(in_grasp,   grasp_ok | grasp_pos_escape,   can_advance)
         can_advance = torch.where(in_release, release_ok, can_advance)
         can_advance = torch.where(in_lower,   lower_ok,   can_advance)
         can_advance = can_advance | pre_grasp_settled

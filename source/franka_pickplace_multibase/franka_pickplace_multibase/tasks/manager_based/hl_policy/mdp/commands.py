@@ -389,11 +389,21 @@ class HLPoseCommand(CommandTerm):
         p = self.planner
 
         if p._grasp_miss.any():
+            finger_pos = self.robot.data.joint_pos[:, self.robot.find_joints("panda_finger_joint.*")[0]]
+            finger_open = finger_pos.mean(dim=-1)
+            cube_to_ee_xy = torch.norm(current_cube_pos[:, :2] - ee_pos_w[:, :2], dim=-1)
             for i in torch.where(p._grasp_miss)[0].tolist():
                 cz = current_cube_pos[i, 2].item()
                 _LOG.warning(
-                    "[HL] env %d grasp_miss  cube_z=%.3f < %.3f  retry=%d/%d  -> PRE_GRASP",
-                    i, cz, p.min_carry_cube_z, p._retry_count[i].item(), p.max_retries,
+                    "[HL] env %d grasp_miss  cube_z=%.3f < %.3f  "
+                    "finger_open=%.4f  cube_to_ee_xy=%.4f  retry=%d/%d  -> PRE_GRASP",
+                    i,
+                    cz,
+                    p.min_carry_cube_z,
+                    finger_open[i].item(),
+                    cube_to_ee_xy[i].item(),
+                    p._retry_count[i].item(),
+                    p.max_retries,
                 )
 
         if p._place_miss.any():
@@ -416,15 +426,17 @@ class HLPoseCommand(CommandTerm):
             self._stuck_warned[i] = False
 
         stuck = (~p._track_ok) & (p._elapsed > self.cfg.stuck_warn_s) & ~self._stuck_warned
+        cmd_pos_err = torch.norm(ee_pos_w - self._target_pos_w, dim=-1)
         for i in torch.where(stuck)[0].tolist():
             stage    = int(p.stage[i].item())
             task_idx = int(p._task_idx[i].item())
             _LOG.warning(
                 "[HL] env %d [obj %d/%d] stuck  stage=%d %s  t=%.2fs  "
-                "pos_err=%.4f  ang_err=%.4f  (tol pos=%.3f ang=%.3f)  target_w=%s  ee_w=%s",
+                "endpoint_err=%.4f  cmd_err=%.4f  ang_err=%.4f  "
+                "(tol pos=%.3f ang=%.3f)  target_w=%s  ee_w=%s",
                 i, task_idx, self._M_active - 1,
                 stage, STAGE_NAMES[stage], p._elapsed[i].item(),
-                p._pos_err[i].item(), p._ang_err[i].item(),
+                p._pos_err[i].item(), cmd_pos_err[i].item(), p._ang_err[i].item(),
                 p._pos_tol_eff[i].item(), p._ang_tol_eff[i].item(),
                 _fmt_xyz(self._target_pos_w[i]), _fmt_xyz(ee_pos_w[i]),
             )

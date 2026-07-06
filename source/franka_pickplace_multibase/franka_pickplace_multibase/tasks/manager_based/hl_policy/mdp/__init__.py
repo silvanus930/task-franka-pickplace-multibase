@@ -52,4 +52,6 @@ from .terminations import (  # noqa: F401
     cube_reached_goal,
     object_dropped_mid_carry,
     objects_in_container,
+    planner_grasp_failed,
+    planner_reach_failed,
 )

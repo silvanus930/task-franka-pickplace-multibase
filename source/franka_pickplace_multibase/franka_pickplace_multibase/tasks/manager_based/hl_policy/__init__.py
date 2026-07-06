@@ -25,6 +25,10 @@ Registered environments:
 
         python play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0
 
+``Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0``
+    One-env diagnostic variant with strict drop/fall checks but relaxed
+    incidental container displacement. Use this before official scoring.
+
 Both environments use the same frozen LL RSL-RL checkpoint and the same
 classical ``PickPlacePlanner`` state machine.
 """
@@ -57,6 +61,16 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point":    f"{__name__}.hl_env_cfg_envhub:HLEnvCfg_Envhub_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.ppo_cfg:LLPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point":    f"{__name__}.hl_env_cfg_envhub:HLEnvCfg_Envhub_SAFE_PLAY",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.ppo_cfg:LLPPORunnerCfg",
     },
 )

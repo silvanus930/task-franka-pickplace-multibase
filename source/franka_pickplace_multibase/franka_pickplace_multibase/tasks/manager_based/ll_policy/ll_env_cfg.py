@@ -208,12 +208,24 @@ class ObservationsCfg:
 class EventCfg:
     """Reset events executed at each episode boundary."""
 
-    # Randomise arm joint configuration to expose the policy to diverse starts.
-    reset_robot_joints = EventTerm(
+    # Randomise only the 7 arm joints. Finger joints are reset separately to
+    # their safe default opening so random scaling cannot request invalid widths.
+    reset_arm_joints = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
             "position_range": (0.5, 1.5),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
+    reset_finger_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"]),
+            "position_range": (0.0, 0.0),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -250,7 +262,7 @@ class RewardsCfg:
     # ---- Orientation tracking ----
     ee_ori_tracking_coarse = RewTerm(
         func=mdp.orientation_command_error,
-        weight=-0.3,
+        weight=-0.8,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
             "command_name": "ee_pose",
@@ -258,9 +270,9 @@ class RewardsCfg:
     )
     ee_ori_tracking_fine = RewTerm(
         func=mdp.orientation_command_error_tanh,
-        weight=0.5,
+        weight=1.5,
         params={
-            "std": 0.15,
+            "std": 0.12,
             "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
             "command_name": "ee_pose",
         },

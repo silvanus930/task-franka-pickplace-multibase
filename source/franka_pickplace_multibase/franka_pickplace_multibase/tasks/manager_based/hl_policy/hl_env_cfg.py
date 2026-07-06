@@ -183,8 +183,9 @@ class HLEventCfg:
 
     Execution order (dict insertion order):
       1. reset_scene              – reset robot and all objects to defaults.
-      2. reset_robot_joints       – randomise arm joint positions.
-      3. reset_cube_and_goal_poses – scatter objects, set container goals.
+      2. reset_arm_joints         – randomise arm joint positions.
+      3. reset_finger_joints      – reset fingers to safe default opening.
+      4. reset_cube_and_goal_poses – scatter objects, set container goals.
 
     Note: HLEventCfg does NOT inherit from EventCfg to preserve reset ordering.
     """
@@ -194,11 +195,22 @@ class HLEventCfg:
         mode="reset",
     )
 
-    reset_robot_joints: EventTerm = EventTerm(
+    reset_arm_joints: EventTerm = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
             "position_range": (0.5, 1.5),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
+    reset_finger_joints: EventTerm = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"]),
+            "position_range": (0.0, 0.0),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -278,6 +290,22 @@ class HLTerminationsCfg:
         },
     )
 
+    planner_grasp_failed: DoneTerm = DoneTerm(
+        func=mdp.planner_grasp_failed,
+        params={
+            "pose_cmd_name": "ee_pose",
+            "enable_log":    True,
+        },
+    )
+
+    planner_reach_failed: DoneTerm = DoneTerm(
+        func=mdp.planner_reach_failed,
+        params={
+            "pose_cmd_name": "ee_pose",
+            "enable_log":    True,
+        },
+    )
+
     # Failure: container knocked off the table or tipped over.
     container_fell: DoneTerm = DoneTerm(
         func=mdp.container_fell,
@@ -295,7 +323,28 @@ class HLTerminationsCfg:
         params={
             "container_cfg":    SceneEntityCfg("container"),
             "max_displacement": _C.max_displacement,
+            "max_yaw_displacement": 0.10,
             "enable_log":       True,
+        },
+    )
+
+
+@configclass
+class HLSafeTerminationsCfg(HLTerminationsCfg):
+    """Conservative diagnostic terminations for production-readiness checks.
+
+    This keeps hard safety failures active while allowing small incidental bin
+    bumps during early policy validation. Use the strict ``HLTerminationsCfg``
+    for benchmark scoring.
+    """
+
+    container_displaced: DoneTerm = DoneTerm(
+        func=mdp.container_displaced,
+        params={
+            "container_cfg":         SceneEntityCfg("container"),
+            "max_displacement":     0.08,
+            "max_yaw_displacement": 0.35,
+            "enable_log":           True,
         },
     )
 
@@ -330,3 +379,22 @@ class HLEnvCfg(LLEnvCfg):
         # lands on top of one already inside).  Restore the Isaac Lab default so
         # sub-0.5 m/s impacts are treated as inelastic resting contacts.
         self.sim.physx.bounce_threshold_velocity = 0.5
+
+
+@configclass
+class HLEnvCfg_Safe(HLEnvCfg):
+    """Safe diagnostic HL configuration.
+
+    Not intended for final scoring. This variant uses the same scene and
+    planner but relaxes incidental container displacement enough to distinguish
+    LL/planner weaknesses from brittle early-contact resets.
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.episode_length_s = 45.0
+        self.commands.ee_pose.max_retries = 2
+        self.commands.ee_pose.log_env_id = 0

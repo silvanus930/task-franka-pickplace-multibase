@@ -41,10 +41,17 @@ parser.add_argument("--num_envs", type=int, default=None, help="Override number 
 parser.add_argument("--task", type=str, default="Nepher-Franka-PickPlace-LL-Play-v0", help="Registered gym task ID.")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="Agent config entry point key.")
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
+parser.add_argument("--preset", type=str, default=None, help="Override EnvHub preset/env_id for HL EnvHub play tasks.")
+parser.add_argument("--max_steps", type=int, default=None, help="Stop play/eval after this many vectorized env steps.")
+parser.add_argument("--max_episodes", type=int, default=None, help="Stop play/eval after this many completed episodes across envs.")
 parser.add_argument("--real-time", action="store_true", default=False, help="Throttle to real-time speed.")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if args_cli.video:
+    args_cli.enable_cameras = True
+
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
@@ -80,6 +87,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     train_task_name = task_name.replace("-Play", "")
 
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if args_cli.preset is not None:
+        if not hasattr(env_cfg, "env_id"):
+            raise ValueError("--preset is only supported by EnvHub-backed tasks with an env_id field.")
+        env_cfg.env_id = args_cli.preset
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
 
@@ -120,7 +131,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     # Export policy for downstream use (HL policy, real-robot deployment, etc.).
-    policy_nn = runner.alg.policy
+    policy_nn = getattr(runner.alg, "policy", None)
+    if policy_nn is None:
+        policy_nn = getattr(runner.alg, "actor_critic", None)
+    if policy_nn is None:
+        raise AttributeError("Could not find policy module on runner.alg")
     normalizer = getattr(policy_nn, "actor_obs_normalizer", None)
     export_dir = policy_paths.BEST_POLICY_EXPORT_DIR
     os.makedirs(export_dir, exist_ok=True)
@@ -131,31 +146,82 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     dt = env.unwrapped.step_dt
     obs = env.get_observations()
     timestep = 0
+    episode_steps = torch.zeros(env.unwrapped.num_envs, dtype=torch.long, device=env.unwrapped.device)
+    eval_metrics = {
+        "episodes": 0,
+        "success": 0,
+        "failure": 0,
+        "timeout": 0,
+        "drop": 0,
+        "episode_length_sum": 0.0,
+    }
 
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
+            episode_steps += 1
             actions = policy(obs)
             obs, _, dones, _ = env.step(actions)
-            policy_nn.reset(dones)
+            if hasattr(policy_nn, "reset"):
+                policy_nn.reset(dones)
 
             if dones.any():
                 unwrapped = env.unwrapped
-                success = unwrapped.termination_manager.get_term("cube_at_goal")
+                termination_manager = unwrapped.termination_manager
+                active_terms = set(getattr(termination_manager, "active_terms", []))
+                success = torch.zeros_like(dones, dtype=torch.bool)
+                failure = torch.zeros_like(dones, dtype=torch.bool)
+                drop = torch.zeros_like(dones, dtype=torch.bool)
+                for term_name in active_terms:
+                    lower = term_name.lower()
+                    term_done = termination_manager.get_term(term_name).bool()
+                    if "goal" in lower or "success" in lower or "complete" in lower:
+                        success |= term_done
+                    if "fell" in lower or "drop" in lower or "fail" in lower or "displace" in lower or "container" in lower:
+                        failure |= term_done
+                    if "drop" in lower:
+                        drop |= term_done
                 for i in torch.where(dones)[0].tolist():
+                    eval_metrics["episodes"] += 1
+                    eval_metrics["episode_length_sum"] += float(episode_steps[i].item())
+                    eval_metrics["success"] += int(success[i].item())
+                    eval_metrics["drop"] += int(drop[i].item())
                     if success[i]:
                         print(f"[INFO] env {i}: SUCCESS — pick-and-place complete, resetting")
                     elif unwrapped.reset_time_outs[i]:
+                        eval_metrics["timeout"] += 1
                         print(f"[INFO] env {i}: episode timeout — resetting")
+                    elif failure[i]:
+                        eval_metrics["failure"] += 1
+                        print(f"[INFO] env {i}: task failure — resetting")
+                    episode_steps[i] = 0
 
         if args_cli.video:
             timestep += 1
             if timestep >= args_cli.video_length:
                 break
+        elif args_cli.max_steps is not None:
+            timestep += 1
+            if timestep >= args_cli.max_steps:
+                break
+
+        if args_cli.max_episodes is not None and eval_metrics["episodes"] >= args_cli.max_episodes:
+            break
 
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    episodes = eval_metrics["episodes"]
+    avg_episode_length = eval_metrics["episode_length_sum"] / episodes if episodes else 0.0
+    success_rate = eval_metrics["success"] / episodes if episodes else 0.0
+    print(
+        "[INFO] Evaluation metrics: "
+        f"episodes={episodes}, success={eval_metrics['success']}, "
+        f"failure={eval_metrics['failure']}, timeout={eval_metrics['timeout']}, "
+        f"drop={eval_metrics['drop']}, avg_episode_length={avg_episode_length:.2f}, "
+        f"success_rate={success_rate:.3f}"
+    )
 
     env.close()
 

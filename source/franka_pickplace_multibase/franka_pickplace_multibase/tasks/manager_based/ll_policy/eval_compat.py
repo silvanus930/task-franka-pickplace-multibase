@@ -16,7 +16,7 @@ Design:
   (multi-object EnvHub path).  Intentionally excludes failure terms
   (``cube_fell``, ``object_dropped``, ``container_fell``,
   ``container_displaced``) even though they are also non-timeout terms.
-- ``task_failed``: any object-fell / drop / displaced / container failure
+- ``task_failed``: any object-fell / drop / displaced / explicit failure
   termination OR a hard timeout.  Kept separate from ``task_completed`` so
   the scorer can distinguish successes, clean failures, and timeouts.
 
@@ -86,8 +86,10 @@ class EvalCompatEnv:
         """``True`` for envs where a failure termination or timeout occurred.
 
         Matches any termination term whose name contains ``'fell'``,
-        ``'drop'``, ``'fail'``, ``'displace'``, or ``'container'``
-        (object/container failure terms), plus hard timeouts
+        ``'drop'``, ``'fail'``, ``'displace'``, or ``'unsafe'``, plus hard
+        timeouts. It intentionally does not classify every ``container`` term
+        as failure because container-named success terms are valid in this
+        task family.
         (``time_out=True`` terms that fired at the episode step limit).
         This covers ``cube_fell``, ``object_dropped``, ``container_fell``,
         ``container_displaced``, and ``time_out``.
@@ -107,7 +109,7 @@ class EvalCompatEnv:
                     or "drop" in lower
                     or "fail" in lower
                     or "displace" in lower
-                    or "container" in lower
+                    or "unsafe" in lower
                 ):
                     failure = failure | tm.get_term(term_name).bool()
             return failure

@@ -371,6 +371,93 @@ def object_dropped_mid_carry(
 
 
 # ---------------------------------------------------------------------------
+# Container task: planner_grasp_failed
+# ---------------------------------------------------------------------------
+
+
+def planner_grasp_failed(
+    env: ManagerBasedRLEnv,
+    pose_cmd_name: str = "ee_pose",
+    enable_log: bool = True,
+) -> torch.Tensor:
+    """Return ``True`` when the HL planner exhausts grasp retries.
+
+    This is a diagnostic/safety failure term: if the planner repeatedly reaches
+    the object but cannot secure it, the episode should end as a clear failure
+    instead of drifting into a timeout.
+    """
+    from .commands import HLPoseCommand
+
+    pose_term: HLPoseCommand = env.command_manager.get_term(pose_cmd_name)
+    planner = pose_term.planner
+
+    failed = planner._grasp_miss & (planner._retry_count >= planner.max_retries)
+
+    if enable_log and failed.any():
+        _ensure_log_configured()
+        for i in torch.where(failed)[0].tolist():
+            msg = (
+                f"[HL] env {i} PLANNER_GRASP_FAILED  "
+                f"retry={int(planner._retry_count[i].item())}/{planner.max_retries}  "
+                "-> episode reset"
+            )
+            _LOG.warning(msg)
+            print(msg, flush=True)
+
+    return failed
+
+
+# ---------------------------------------------------------------------------
+# Container task: planner_reach_failed
+# ---------------------------------------------------------------------------
+
+
+def planner_reach_failed(
+    env: ManagerBasedRLEnv,
+    pose_cmd_name: str = "ee_pose",
+    command_error_threshold: float = 0.12,
+    enable_log: bool = True,
+) -> torch.Tensor:
+    """Return ``True`` when the HL planner cannot reach approach stages.
+
+    Fires in PRE_GRASP/DESCEND after the planner's reach-stall budget is
+    exhausted. This turns a non-progressing approach into a clear failure
+    signal instead of a long timeout.
+    """
+    from ..classical_planner import Stage
+    from .commands import HLPoseCommand
+
+    pose_term: HLPoseCommand = env.command_manager.get_term(pose_cmd_name)
+    planner = pose_term.planner
+    ee_pos_w = pose_term.robot.data.body_pos_w[:, pose_term._body_idx]
+    cmd_err = torch.norm(ee_pos_w - pose_term._target_pos_w, dim=-1)
+
+    in_approach = planner.stage <= int(Stage.DESCEND)
+    failed = (
+        in_approach
+        & (planner._elapsed > planner.stall_time_s)
+        & (cmd_err > command_error_threshold)
+        & (planner._reach_retries >= planner.max_reach_retries)
+    )
+
+    if enable_log and failed.any():
+        _ensure_log_configured()
+        for i in torch.where(failed)[0].tolist():
+            msg = (
+                f"[HL] env {i} PLANNER_REACH_FAILED  "
+                f"stage={int(planner.stage[i].item())}  "
+                f"cmd_err={cmd_err[i].item():.4f}>{command_error_threshold:.4f}  "
+                f"endpoint_err={planner._pos_err[i].item():.4f}  "
+                f"reach_retry={int(planner._reach_retries[i].item())}/{planner.max_reach_retries}  "
+                "-> episode reset"
+            )
+            _LOG.warning(msg)
+            print(msg, flush=True)
+
+    return failed
+
+
+# ---------------------------------------------------------------------------
 # Container task: container_fell
 # ---------------------------------------------------------------------------
 

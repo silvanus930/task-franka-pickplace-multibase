@@ -57,6 +57,7 @@ from isaaclab.utils import configclass
 from franka_pickplace_multibase.tasks.manager_based.hl_policy.hl_env_cfg import (
     GOAL_POS_DEFAULT,
     HLEnvCfg,
+    HLSafeTerminationsCfg,
 )
 from franka_pickplace_multibase.tasks.manager_based.ll_policy.ll_env_cfg import LLSceneCfg
 import franka_pickplace_multibase.tasks.manager_based.hl_policy.mdp as mdp
@@ -484,10 +485,36 @@ class HLEnvCfg_Envhub(HLEnvCfg):
 
 @configclass
 class HLEnvCfg_Envhub_PLAY(HLEnvCfg_Envhub):
-    """Play / evaluation variant: fewer envs, no observation noise."""
+    """Play / evaluation variant: full 30-scenario benchmark, no observation noise.
+
+    ``play.py --num_envs`` may still override this for quick local smoke tests
+    after Hydra config construction.
+    """
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.scene.num_envs = 4
+        self.scene.num_envs = 30
         self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False
+
+
+@configclass
+class HLEnvCfg_Envhub_SAFE_PLAY(HLEnvCfg_Envhub):
+    """Safe diagnostic EnvHub variant for production-readiness debugging.
+
+    This variant keeps object/container fall and drop checks active, but relaxes
+    incidental container displacement. It is intentionally separate from
+    ``HLEnvCfg_Envhub_PLAY`` so official 30-env benchmark evaluation remains
+    strict and comparable.
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.scene.env_spacing = 2.5
+        self.episode_length_s = 45.0
+        self.observations.policy.enable_corruption = False
+        self.commands.ee_pose.max_retries = 2
+        self.commands.ee_pose.log_env_id = 0
