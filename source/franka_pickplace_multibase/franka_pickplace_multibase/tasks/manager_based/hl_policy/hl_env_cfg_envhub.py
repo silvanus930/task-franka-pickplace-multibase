@@ -138,6 +138,14 @@ class HLEnvCfg_Envhub(HLEnvCfg):
     scene_id: str | int = 0
     """Scene index or name inside the envhub environment manifest."""
 
+    scenario_ids: list[int] | None = None
+    """Optional benchmark scenario ids to replay in local env slots.
+
+    When set, local env index ``i`` uses scenario ``scenario_ids[i]``. This is
+    useful for focused videos of failed benchmark cases without rendering all
+    30 envs.
+    """
+
     _preset: Any = None
 
     def __post_init__(self) -> None:
@@ -284,6 +292,7 @@ class HLEnvCfg_Envhub(HLEnvCfg):
                 "container_interior_half_y": _C.interior_half_y,
                 "container_drop_z_local":    _DROP_Z_LOCAL,
                 "center_drop":               True,
+                "scenario_ids":              self.scenario_ids,
             },
         )
 

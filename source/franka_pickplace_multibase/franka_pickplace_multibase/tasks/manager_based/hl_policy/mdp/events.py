@@ -238,6 +238,7 @@ def reset_typed_objects_from_scenario(
     env_ids: torch.Tensor,
     all_object_cfgs: list[SceneEntityCfg],
     scenario_strategy,
+    scenario_ids: list[int] | tuple[int, ...] | None = None,
     pose_cmd_name: str = "ee_pose",
     parking_pos: tuple[float, float, float] = (20.0, 0.0, 0.5),
     # Container params (optional).  When provided the container pose is read
@@ -282,13 +283,23 @@ def reset_typed_objects_from_scenario(
     if env_ids.numel() == 0:
         return
 
-    N   = env_ids.numel()
+    N = env_ids.numel()
     dev = env.device
+    if scenario_ids is not None:
+        scenario_id_tensor = torch.as_tensor(scenario_ids, dtype=torch.long, device=dev)
+        if scenario_id_tensor.numel() < int(env_ids.max().item()) + 1:
+            raise ValueError(
+                "scenario_ids must have at least one entry per local env index "
+                f"(need {int(env_ids.max().item()) + 1}, got {scenario_id_tensor.numel()})"
+            )
+        scenario_lookup_ids = scenario_id_tensor[env_ids]
+    else:
+        scenario_lookup_ids = env_ids
 
     # ------------------------------------------------------------------
     # 1. Get per-catalog spawn positions (inactive slots → parking_pos).
     # ------------------------------------------------------------------
-    spawn_pos_cat, spawn_rot_cat = scenario_strategy.get_catalog_spawns(env_ids, dev)
+    spawn_pos_cat, spawn_rot_cat = scenario_strategy.get_catalog_spawns(scenario_lookup_ids, dev)
     # spawn_pos_cat: (N, C, 3),  spawn_rot_cat: (N, C, 4)
 
     # ------------------------------------------------------------------
@@ -307,7 +318,7 @@ def reset_typed_objects_from_scenario(
         # Container pose is explicitly defined per scenario — no runtime
         # randomisation.  This guarantees the pre-validated spawn clearance
         # from scenarios.json always holds.
-        container_local_pos, container_rot = scenario_strategy.get_container_pose(env_ids, dev)
+        container_local_pos, container_rot = scenario_strategy.get_container_pose(scenario_lookup_ids, dev)
         cx_l = container_local_pos[:, 0]   # (N,) robot-local X
         cy_l = container_local_pos[:, 1]   # (N,) robot-local Y
 
@@ -359,13 +370,13 @@ def reset_typed_objects_from_scenario(
     # 3b. Point-goal mode: use goal positions from the scenario file.
     # ------------------------------------------------------------------
     else:
-        goal_pos, goal_rot = scenario_strategy.get_goals(env_ids, dev)
+        goal_pos, goal_rot = scenario_strategy.get_goals(scenario_lookup_ids, dev)
         pose_term.set_goals_from_strategy(env_ids, goal_pos, goal_rot)
 
     # ------------------------------------------------------------------
     # 4. Update per-env active catalog indices (grasp-metadata selection).
     # ------------------------------------------------------------------
-    active_indices = scenario_strategy.get_active_indices(env_ids, dev)  # (N, M_active)
+    active_indices = scenario_strategy.get_active_indices(scenario_lookup_ids, dev)  # (N, M_active)
     pose_term.set_active_objects_from_typed_scenario(env_ids, active_indices)
 
 

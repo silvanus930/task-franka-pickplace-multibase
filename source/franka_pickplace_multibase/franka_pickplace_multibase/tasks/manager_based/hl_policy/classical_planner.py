@@ -467,7 +467,7 @@ class PickPlacePlanner:
         self._grasp_yaw_flip[env_mask] = 0.0
 
         env_ids = torch.where(env_mask)[0]
-        self._yaw[env_ids] = self._resolve_grasp_yaw(cube_quat_w[env_ids])
+        self._yaw[env_ids] = self._resolve_grasp_yaw(cube_quat_w[env_ids], env_ids)
 
     def _advance_to_next_object(
         self,
@@ -611,21 +611,54 @@ class PickPlacePlanner:
         round_sym = self._cur_grasp_sym <= 1e-6
         return (has_catalog | is_box) & (~round_sym)
 
-    def _resolve_grasp_yaw(self, obj_quat: torch.Tensor) -> torch.Tensor:
+    def _merge_grasp_yaw_debug(self, env_ids: torch.Tensor, debug: GraspYawDebug) -> None:
+        """Merge per-env grasp-yaw debug; supports partial env_id batches."""
+        if env_ids.numel() == self.num_envs:
+            self._grasp_yaw_debug = debug
+            return
+        if self._grasp_yaw_debug is None:
+            self._grasp_yaw_debug = debug
+            return
+        prev = self._grasp_yaw_debug
+        prev.object_yaw[env_ids] = debug.object_yaw
+        prev.target_yaw[env_ids] = debug.target_yaw
+        prev.long_axis_w[env_ids] = debug.long_axis_w
+        prev.closing_axis_w[env_ids] = debug.closing_axis_w
+        for i, eid in enumerate(env_ids.tolist()):
+            prev.source[eid] = debug.source[i]
+
+    def _resolve_grasp_yaw(
+        self,
+        obj_quat: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Object-aligned wrist yaw for PRE_GRASP; stores debug vectors for logging."""
-        yaw_off = self._cur_grasp_yaw_off + self._cur_grasp_frame_yaw_off
-        yaw, self._grasp_yaw_debug = compute_grasp_yaw(
+        batch = obj_quat.shape[0]
+        if env_ids is None:
+            env_ids = torch.arange(batch, device=self.device)
+        else:
+            env_ids = env_ids.reshape(-1)
+        if env_ids.numel() != batch:
+            raise ValueError(
+                f"grasp yaw batch mismatch: obj_quat={batch}, env_ids={env_ids.numel()}"
+            )
+
+        yaw_off = (
+            self._cur_grasp_yaw_off[env_ids]
+            + self._cur_grasp_frame_yaw_off[env_ids]
+        )
+        yaw, debug = compute_grasp_yaw(
             obj_quat,
-            self._cur_grasp_sym,
+            self._cur_grasp_sym[env_ids],
             yaw_off,
-            self._cur_grasp_long_axis_local,
-            self._cur_footprint_xy,
-            self._cur_upright_height,
+            self._cur_grasp_long_axis_local[env_ids],
+            self._cur_footprint_xy[env_ids],
+            self._cur_upright_height[env_ids],
             self._gripper_frame,
         )
-        yaw = normalize_yaw(yaw + self._grasp_yaw_flip)
-        if self._grasp_yaw_debug is not None:
-            self._grasp_yaw_debug.target_yaw = yaw
+        yaw = normalize_yaw(yaw + self._grasp_yaw_flip[env_ids])
+        debug.target_yaw = yaw
+        self._merge_grasp_yaw_debug(env_ids, debug)
         return yaw
 
     def _apply_yaw_flip_on_grasp_miss(self, env_mask: torch.Tensor) -> None:
@@ -714,7 +747,7 @@ class PickPlacePlanner:
         self._target_quat[ids]    = 0.0
         self._target_quat[ids, 0] = 1.0
         self._yaw[ids]            = (
-            self._resolve_grasp_yaw(cube_quat_w[ids])
+            self._resolve_grasp_yaw(cube_quat_w[ids], ids)
             if cube_quat_w is not None else torch.zeros(ids.numel(), device=self.device)
         )
         self._yaw_k[ids]          = 0
@@ -783,14 +816,18 @@ class PickPlacePlanner:
 
         # Yaw is set and settled in PRE_GRASP only; frozen before DESCEND/GRASP.
         in_pre_grasp = self._stage == int(Stage.PRE_GRASP)
+        in_descend = self._stage == int(Stage.DESCEND)
+        past_descend = self._stage > int(Stage.DESCEND)
         if in_pre_grasp.any():
             self._update_grasp_orientation(cube_quat_w, cube_pos_w)
             new_yaw = self._resolve_grasp_yaw(cube_quat_w)
             self._yaw = torch.where(in_pre_grasp, new_yaw, self._yaw)
-        elif self._stage <= int(Stage.DESCEND):
+        if in_descend.any():
             self._update_grasp_orientation(cube_quat_w, cube_pos_w)
-        else:
-            self._cur_grasp_z_eff.copy_(self._cur_grasp_z_off)
+        if past_descend.any():
+            self._cur_grasp_z_eff = torch.where(
+                past_descend, self._cur_grasp_z_off, self._cur_grasp_z_eff
+            )
 
         grasp_x, grasp_y = self._update_grasp_aim_point(cube_pos_w, cube_quat_w)
 
@@ -1035,7 +1072,8 @@ class PickPlacePlanner:
             self._stage[grasp_miss]       = int(Stage.PRE_GRASP)
             self._elapsed[grasp_miss]     = 0.0
             self._pre_settle[grasp_miss]  = 0.0
-            self._yaw[grasp_miss] = self._resolve_grasp_yaw(cube_quat_w[grasp_miss])
+            miss_ids = torch.where(grasp_miss)[0]
+            self._yaw[miss_ids] = self._resolve_grasp_yaw(cube_quat_w[miss_ids], miss_ids)
 
         grasp_still_failing = grasp_failed | carry_missed
         grasp_exhausted = (
@@ -1086,7 +1124,10 @@ class PickPlacePlanner:
                 self._stage[place_missed]        = int(Stage.PRE_GRASP)
                 self._elapsed[place_missed]      = 0.0
                 self._pre_settle[place_missed]   = 0.0
-                self._yaw[place_missed] = self._resolve_grasp_yaw(cube_quat_w[place_missed])
+                place_ids = torch.where(place_missed)[0]
+                self._yaw[place_ids] = self._resolve_grasp_yaw(
+                    cube_quat_w[place_ids], place_ids
+                )
                 self._place_offset[place_missed] = 0.0
                 self._yaw_offset[place_missed]   = 0.0
                 self._retreat_ctr[place_missed]  = 0
