@@ -11,6 +11,13 @@ Trains a policy that moves the end-effector to any commanded target pose
 Registered environments:
   Nepher-Franka-PickPlace-LL-v0        — training  (4096 envs, noise on)
   Nepher-Franka-PickPlace-LL-Play-v0   — evaluation (32 envs, noise off)
+
+Safe finetune variants (empty table, resume from model_5400):
+  Nepher-Franka-PickPlace-LL-SafeGrip-v0
+  Nepher-Franka-PickPlace-LL-SafeSmooth-v0
+  Nepher-Franka-PickPlace-LL-SafeShallow-v0
+  Nepher-Franka-PickPlace-LL-SafeCombo-v0
+  Nepher-Franka-PickPlace-LL-SafeDisp-v0
 """
 
 import gymnasium as gym
@@ -34,5 +41,57 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ll_env_cfg:LLEnvCfg_PLAY",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.ppo_cfg:LLPPORunnerCfg",
+    },
+)
+
+_SAFE_AGENT = f"{agents.__name__}.ppo_cfg:LLPPORunnerCfg_SafeFinetune"
+
+gym.register(
+    id="Nepher-Franka-PickPlace-LL-SafeGrip-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.ll_env_cfg_safe:LLEnvCfg_SafeGripFinetune",
+        "rsl_rl_cfg_entry_point": _SAFE_AGENT,
+    },
+)
+
+gym.register(
+    id="Nepher-Franka-PickPlace-LL-SafeSmooth-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.ll_env_cfg_safe:LLEnvCfg_SafeSmoothFinetune",
+        "rsl_rl_cfg_entry_point": _SAFE_AGENT,
+    },
+)
+
+gym.register(
+    id="Nepher-Franka-PickPlace-LL-SafeShallow-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.ll_env_cfg_safe:LLEnvCfg_SafeShallowFinetune",
+        "rsl_rl_cfg_entry_point": _SAFE_AGENT,
+    },
+)
+
+gym.register(
+    id="Nepher-Franka-PickPlace-LL-SafeCombo-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.ll_env_cfg_safe:LLEnvCfg_SafeComboFinetune",
+        "rsl_rl_cfg_entry_point": _SAFE_AGENT,
+    },
+)
+
+gym.register(
+    id="Nepher-Franka-PickPlace-LL-SafeDisp-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.ll_env_cfg_safe:LLEnvCfg_SafeDispFinetune",
+        "rsl_rl_cfg_entry_point": _SAFE_AGENT,
     },
 )

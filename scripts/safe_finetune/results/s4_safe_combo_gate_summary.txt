@@ -1,0 +1,18 @@
+--- Step 2: official eval on each saved checkpoint ---
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5500.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5500.pt (below baseline 0.131)
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5550.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5550.pt (below baseline 0.131)
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5600.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5600.pt (below baseline 0.131)
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5649.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_17-00-08_safe_combo_finetune/model_5649.pt (below baseline 0.131)
+
+============================================================
+No checkpoint beat baseline 0.131. Keep model_5500.pt
+Gate log: /root/leatherback-stack/task-franka-pickplace-multibase/scripts/safe_finetune/results/s4_safe_combo_gate_summary.txt
+============================================================

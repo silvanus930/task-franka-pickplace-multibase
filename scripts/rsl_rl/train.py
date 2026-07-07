@@ -45,6 +45,11 @@ parser.add_argument("--max_iterations", type=int, default=None, help="Override m
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+# Headless video needs offscreen rendering (same as play.py).
+if args_cli.video:
+    args_cli.enable_cameras = True
+
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)

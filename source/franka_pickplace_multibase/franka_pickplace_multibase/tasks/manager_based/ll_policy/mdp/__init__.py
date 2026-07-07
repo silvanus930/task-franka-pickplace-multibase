@@ -46,7 +46,12 @@ from .observations import (  # noqa: F401
 
 # Custom reward terms.
 from .rewards import (  # noqa: F401
+    ee_speed_while_closed,
     gripper_command_tracking,
+    gripper_command_tracking_grasp_gated,
+    gripper_grasp_contact_shaping,
+    gripper_grasp_contact_shaping_grasp_gated,
+    no_close_while_high,
     orientation_command_error_tanh,
 )
 

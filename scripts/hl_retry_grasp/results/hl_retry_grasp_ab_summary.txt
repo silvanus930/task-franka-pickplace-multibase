@@ -1,0 +1,15 @@
+HL retry/grasp — A/B eval (no training)
+Policy: /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_19-01-58_hl_in_loop_v3_finetune/model_5510.pt
+Tweaks: max_retries=5, grasp_hold_s=1.0
+Started: Tue Jul  7 20:07:23 UTC 2026
+
+>>> A: baseline HL (EnvhubPlay)
+  baseline score=0.14088148148148147
+
+>>> B: RetryGrasp HL (max_retries=5, grasp_hold_s=1.0)
+  retry_grasp score=0.049049999999999996
+
+============================================================
+KEEP standard HL (0.14088148148148147 >= 0.049049999999999996)
+Summary: /root/leatherback-stack/task-franka-pickplace-multibase/scripts/hl_retry_grasp/results/hl_retry_grasp_ab_summary.txt
+============================================================

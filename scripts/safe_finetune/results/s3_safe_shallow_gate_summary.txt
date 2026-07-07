@@ -1,0 +1,18 @@
+--- Step 2: official eval on each saved checkpoint ---
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5500.pt
+PASS /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5500.pt score=0.15092777777777777
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5550.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5550.pt (below baseline 0.131)
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5600.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5600.pt (below baseline 0.131)
+
+Evaluating /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5649.pt
+FAIL /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5649.pt (below baseline 0.131)
+
+============================================================
+BEST in s3_safe_shallow: /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-36-55_safe_shallow_finetune/model_5500.pt (score=0.15092777777777777)
+Gate log: /root/leatherback-stack/task-franka-pickplace-multibase/scripts/safe_finetune/results/s3_safe_shallow_gate_summary.txt
+============================================================

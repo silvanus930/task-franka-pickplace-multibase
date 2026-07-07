@@ -1,0 +1,14 @@
+HL mustard timing safe — A/B eval (no training)
+Policy: /root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_16-13-57_safe_smooth_finetune/model_5500.pt
+Started: Tue Jul  7 18:49:02 UTC 2026
+
+>>> A: baseline HL (EnvhubPlay)
+  baseline score=0.13090185185185185
+
+>>> B: TimingSafe HL (grasp_hold_s=0.55, mustard z=-0.045)
+  timing_safe score=0.07942037037037036
+
+============================================================
+KEEP standard HL (0.13090185185185185 >= 0.07942037037037036)
+Summary: /root/leatherback-stack/task-franka-pickplace-multibase/scripts/hl_timing_safe/results/hl_timing_ab_summary.txt
+============================================================

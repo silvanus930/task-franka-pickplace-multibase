@@ -49,6 +49,7 @@ from typing import Any
 
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -61,6 +62,7 @@ from franka_pickplace_multibase.tasks.manager_based.hl_policy.hl_env_cfg import 
 )
 from franka_pickplace_multibase.tasks.manager_based.ll_policy.ll_env_cfg import LLSceneCfg
 import franka_pickplace_multibase.tasks.manager_based.hl_policy.mdp as mdp
+import franka_pickplace_multibase.tasks.manager_based.ll_policy.mdp as ll_mdp
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +505,63 @@ class HLEnvCfg_Envhub_PLAY(HLEnvCfg_Envhub):
 
 
 @configclass
+class HLEnvCfg_Envhub_PLAY_TimingSafe(HLEnvCfg_Envhub_PLAY):
+    """Official 30-env eval + safe HL timing tweaks for mustard ``finger_miss``.
+
+    Same strict terminations and layout as ``HLEnvCfg_Envhub_PLAY``.  Only the
+    classical planner timing / mustard grasp depth are adjusted — **no LL
+    retraining**.  Intended for gated A/B eval against the S2 ``model_5500``
+    checkpoint.
+
+    Changes (conservative):
+    * ``grasp_hold_s`` 0.40 → 0.55 — more time in GRASP before finger verify.
+    * Mustard catalog ``grasp_z_offset`` -0.04 → -0.045 — slightly lower TCP.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _apply_mustard_timing_tweaks_to_commands(self.commands.ee_pose)
+
+
+def _apply_mustard_timing_tweaks_to_commands(ee_pose_cmd) -> None:
+    """Patch planner command cfg in-place for safe mustard grasp timing."""
+    ee_pose_cmd.grasp_hold_s = 0.55
+    # Catalog index 1 = mustard bottle (object1) in OBJECT_CATALOG.
+    if ee_pose_cmd.grasp_z_offsets and len(ee_pose_cmd.grasp_z_offsets) > 1:
+        offsets = list(ee_pose_cmd.grasp_z_offsets)
+        offsets[1] = -0.045
+        ee_pose_cmd.grasp_z_offsets = offsets
+
+
+def _apply_retry_grasp_hold_tweaks_to_commands(
+    ee_pose_cmd,
+    *,
+    max_retries: int = 5,
+    grasp_hold_s: float = 1.0,
+) -> None:
+    """Patch planner for more grasp retries and longer GRASP hold before verify."""
+    ee_pose_cmd.max_retries = max_retries
+    ee_pose_cmd.grasp_hold_s = grasp_hold_s
+
+
+@configclass
+class HLEnvCfg_Envhub_PLAY_RetryGrasp(HLEnvCfg_Envhub_PLAY):
+    """Official 30-env eval + extra HL grasp retries and longer GRASP hold.
+
+    Same strict terminations and layout as ``HLEnvCfg_Envhub_PLAY``.  No LL
+    retraining — gated A/B eval against the current ``5510`` checkpoint.
+
+    Changes (global, all objects):
+    * ``max_retries`` 3 → **5** — more PRE_GRASP cycles before abandon.
+    * ``grasp_hold_s`` 0.40 → **1.0 s** — longer close-and-hold before verify.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _apply_retry_grasp_hold_tweaks_to_commands(self.commands.ee_pose)
+
+
+@configclass
 class HLEnvCfg_Envhub_SAFE_PLAY(HLEnvCfg_Envhub):
     """Safe diagnostic EnvHub variant for production-readiness debugging.
 
@@ -522,3 +581,175 @@ class HLEnvCfg_Envhub_SAFE_PLAY(HLEnvCfg_Envhub):
         self.observations.policy.enable_corruption = False
         self.commands.ee_pose.max_retries = 2
         self.commands.ee_pose.log_env_id = 0
+
+
+@configclass
+class HLEnvCfg_Envhub_Finetune(HLEnvCfg_Envhub):
+    """Conservative HL-in-loop LL finetune on the official EnvHub distribution.
+
+    Trains the LL executor while the classical ``PickPlacePlanner`` drives
+    ``ee_pose`` / ``grip_cmd`` against real YCB objects and the KLT bin.
+    Closes the empty-table train/eval gap without the aggressive Phase 1
+    reward / PPO settings that regressed official scores.
+
+    Differences from PLAY / SAFE_PLAY:
+    * Many parallel envs + observation corruption (training regime).
+    * ``HLSafeTerminationsCfg`` — relaxed bin displacement during learning.
+    * Mild S2 smoothness reward bump only (no grip / shallow terms).
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Default training scale; override with ``--num_envs`` on the CLI.
+        self.scene.num_envs = 1024
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = True
+
+        # S2 smoothness only — grip/shallow combos regressed in empty-table runs.
+        self.rewards.action_rate = RewTerm(func=ll_mdp.action_rate_l2, weight=-0.015)
+        self.rewards.joint_vel = RewTerm(
+            func=ll_mdp.joint_vel_l2,
+            weight=-0.002,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+
+@configclass
+class HLEnvCfg_Envhub_FinetuneV3(HLEnvCfg_Envhub):
+    """HL-in-loop v3: mustard / finger_miss focused, extra-conservative.
+
+    Targets the dominant eval failure (obj=1 mustard ``finger_miss`` at 4/5)
+    while keeping proven S2 smoothness and avoiding aggressive terms that
+    regressed in empty-table runs (S3/S5) and HL v2 (80-iter overtrain).
+
+    Reward changes vs base ``LLEnvCfg`` (inherited through ``HLEnvCfg``):
+    * S2 smoothness bump (proven in SafeSmooth).
+    * Mild grip-tracking boost (``finger_miss``).
+    * Mild orientation fine-tracking boost (``PRE_GRASP`` ang_err).
+    * Very mild ``no_close_while_high`` + ``gripper_grasp_contact_shaping``.
+    * No global slow-EE penalty (S5 hurt grasps).
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 512
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = True
+
+        hand = SceneEntityCfg("robot", body_names="panda_hand")
+        fingers = SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])
+
+        # S2 smoothness (keep — best empty-table finetune).
+        self.rewards.action_rate = RewTerm(func=ll_mdp.action_rate_l2, weight=-0.015)
+        self.rewards.joint_vel = RewTerm(
+            func=ll_mdp.joint_vel_l2,
+            weight=-0.002,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+        # LL execution: grip + orientation (mustard / PRE_GRASP gaps).
+        self.rewards.grip_tracking = RewTerm(
+            func=ll_mdp.gripper_command_tracking,
+            weight=2.2,
+            params={"asset_cfg": fingers, "command_name": "grip_cmd"},
+        )
+        self.rewards.ee_ori_tracking_fine = RewTerm(
+            func=ll_mdp.orientation_command_error_tanh,
+            weight=1.3,
+            params={"std": 0.13, "asset_cfg": hand, "command_name": "ee_pose"},
+        )
+
+        # Mild mustard-height shaping (well below Phase-1 weight 0.5).
+        self.rewards.no_close_high = RewTerm(
+            func=ll_mdp.no_close_while_high,
+            weight=0.2,
+            params={
+                "asset_cfg": hand,
+                "grip_command_name": "grip_cmd",
+                "ee_command_name": "ee_pose",
+                "grasp_z_threshold": 0.18,
+                "z_slack": 0.02,
+                "max_penalty_gap": 0.08,
+            },
+        )
+        self.rewards.grip_contact_safe = RewTerm(
+            func=ll_mdp.gripper_grasp_contact_shaping,
+            weight=0.25,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand", joint_names=["panda_finger_joint.*"]),
+                "grip_command_name": "grip_cmd",
+                "ee_command_name": "ee_pose",
+                "contact_min": 0.010,
+                "contact_max": 0.035,
+                "empty_max": 0.004,
+                "grasp_z_threshold": 0.15,
+                "pose_error_threshold": 0.06,
+            },
+        )
+
+
+@configclass
+class HLEnvCfg_Envhub_FinetuneV4(HLEnvCfg_Envhub):
+    """HL-in-loop v4: grasp-gated grip rewards + eval-strict terminations.
+
+    Option B micro-finetune from ``5510`` — targets mustard ``finger_miss`` at the
+    HL GRASP verify window without diffuse global grip shaping (v3) or relaxed
+    train terminations (v2/v3).
+
+    * **Strict** ``HLTerminationsCfg`` (same as official ``EnvhubPlay``).
+    * Disable global ``grip_tracking``; reward close only in HL ``GRASP`` stage.
+    * S2 smoothness only besides grasp-gated terms.
+    * Short run (20 iters, save every 5) — promote best mid checkpoint only.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 512
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = True
+
+        fingers = SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])
+        grasp_asset = SceneEntityCfg(
+            "robot", body_names="panda_hand", joint_names=["panda_finger_joint.*"]
+        )
+
+        # S2 smoothness (proven in SafeSmooth / v3).
+        self.rewards.action_rate = RewTerm(func=ll_mdp.action_rate_l2, weight=-0.015)
+        self.rewards.joint_vel = RewTerm(
+            func=ll_mdp.joint_vel_l2,
+            weight=-0.002,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+        # Turn off global grip reward from ``LLEnvCfg`` — v3 showed it is too diffuse.
+        self.rewards.grip_tracking.weight = 0.0
+
+        # Grasp-gated: only when HL stage==GRASP and grip_cmd==close.
+        self.rewards.grip_tracking_grasp = RewTerm(
+            func=ll_mdp.gripper_command_tracking_grasp_gated,
+            weight=3.5,
+            params={
+                "asset_cfg": fingers,
+                "grip_command_name": "grip_cmd",
+                "ee_pose_command_name": "ee_pose",
+            },
+        )
+        self.rewards.grip_contact_grasp = RewTerm(
+            func=ll_mdp.gripper_grasp_contact_shaping_grasp_gated,
+            weight=0.45,
+            params={
+                "asset_cfg": grasp_asset,
+                "grip_command_name": "grip_cmd",
+                "ee_command_name": "ee_pose",
+                "ee_pose_command_name": "ee_pose",
+                "contact_min": 0.010,
+                "contact_max": 0.035,
+                "empty_max": 0.004,
+                "grasp_z_threshold": 0.15,
+                "pose_error_threshold": 0.06,
+            },
+        )
