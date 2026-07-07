@@ -76,6 +76,14 @@ class GraspObjectCfg:
     compute the correct value automatically.
     """
 
+    grasp_yaw_frame_offset: float = 0.0
+    """Extra wrist-yaw bias (rad) for gripper-frame convention tuning.
+
+    Set to ``0`` or ``math.pi / 2`` when the mesh local frame or camera
+    calibration suggests the closing axis mapping is flipped.  See
+    :mod:`grasp_yaw` and ``HLPoseCommandCfg.grasp_closing_axis``.
+    """
+
     footprint_xy: tuple[float, float] = (0.0, 0.0)
     """Horizontal footprint ``(local_x_size, local_y_size)`` in metres (after scale).
 
@@ -111,6 +119,15 @@ class GraspObjectCfg:
     Non-zero values are rotated into world frame via the object quaternion.
     """
 
+    grasp_long_axis_local: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Object-frame unit direction of the elongation axis (e.g. bottle height).
+
+    When non-zero, grasp yaw is derived from this axis projected into the
+    table XY plane so the gripper closes across the body width (pads parallel
+    to the long axis).  Used for both upright (degenerate XY → body yaw) and
+    lying poses.
+    """
+
     # ---- Spawn ----
     default_pos: tuple[float, float, float] = (0.45, 0.0, 0.055)
     """Default world-local position used for scene initialisation."""
@@ -127,7 +144,12 @@ class GraspObjectCfg:
 
         Falls back to the manual ``grasp_yaw_offset`` when ``footprint_xy`` is
         ``(0, 0)`` (dimensions not specified).
+
+        When ``grasp_long_axis_local`` is set, only the manual ``grasp_yaw_offset``
+        is used — long-axis yaw already aligns pads with the elongation axis.
         """
+        if any(abs(c) > 1e-6 for c in self.grasp_long_axis_local):
+            return self.grasp_yaw_offset
         x, y = self.footprint_xy
         if x <= 0.0 or y <= 0.0:
             return self.grasp_yaw_offset
@@ -145,9 +167,8 @@ _YCB_P = f"{ISAAC_NUCLEUS_DIR}/Props/YCB/Axis_Aligned_Physics"  # physics-baked 
 
 OBJECT_CATALOG: list[GraspObjectCfg] = [
     # 004 sugar box – ~7 cm tall × 3.5 cm × 2.5 cm at 0.7 scale.
-    # Long axis along local Y (3.5 cm), short axis along local X (2.5 cm).
-    # footprint_xy: x < y → effective_grasp_yaw_offset adds π/2 so fingers
-    # span the narrow (local-X) face.  180° yaw symmetry.
+    # Long axis is pose-dependent (local Y when upright, local Z when lying on side).
+    # Leave grasp_long_axis_local at zero; footprint_box picker uses fp + upright_h.
     GraspObjectCfg(
         name="object0",
         usd_path=f"{_YCB_P}/004_sugar_box.usd",
@@ -157,22 +178,23 @@ OBJECT_CATALOG: list[GraspObjectCfg] = [
         grasp_yaw_offset=0.0,
         footprint_xy=(0.025, 0.035),  # local x=2.5 cm (short), local y=3.5 cm (long)
         footprint_radius=0.04,
-        upright_height=0.05,
+        upright_height=0.07,  # ~7 cm tall — used as local-Z extent for axis scoring
         default_pos=(0.60, 0.10, 0.05),
     ),
     # 006 mustard bottle – ~13 cm tall × ~3.5 cm diam at 0.7 scale.
-    # Round cross-section → continuous rotational symmetry → neutral wrist.
-    # footprint_xy equal → no auto π/2 adjustment.
+    # Upright: π/2 symmetry snaps wrist yaw to object table rotation.
+    # Lying: grasp_long_axis_local=(0,0,1) aligns fingers across the body.
     GraspObjectCfg(
         name="object1",
         usd_path=f"{_YCB_P}/006_mustard_bottle.usd",
         scale=(0.7, 0.7, 0.7),
         grasp_z_offset=-0.04,
-        grasp_sym=0.0,
+        grasp_sym=math.pi / 2,
         grasp_yaw_offset=0.0,
         footprint_xy=(0.035, 0.035),  # circular footprint
         footprint_radius=0.03,
         upright_height=0.09,
+        grasp_long_axis_local=(0.0, 0.0, 1.0),
         default_pos=(0.75, -0.10, 0.065),
     ),
     # 005 tomato soup can – ~7 cm tall × ~4.8 cm diam at 0.7 scale.
@@ -257,7 +279,7 @@ class ContainerGeomCfg:
     rim_z: float = 0.11
     """Approximate world Z of the bin rim top."""
 
-    drop_height_above_rim: float = 0.02
+    drop_height_above_rim: float = 0.08
     """Additional height above rim for the LOWER/RELEASE target (drop, not press)."""
 
     retract_xy_offset_table: tuple[float, float] = (-0.05, 0.12)
@@ -313,8 +335,14 @@ def container_drop_slot_offsets_table(
     half_table_x: float,
     half_table_y: float,
     margin: float = 0.75,
+    center_only: bool = False,
 ) -> list[tuple[float, float]]:
-    """Return table-frame XY offsets from bin centre for each object's drop slot."""
+    """Return table-frame XY offsets from bin centre for each object's drop slot.
+
+    When ``center_only=True`` every object targets the bin centre (stacking allowed).
+    """
+    if center_only:
+        return [(0.0, 0.0)] * num_slots
     hx = half_table_x * margin
     hy = half_table_y * margin
     offsets: list[tuple[float, float]] = []

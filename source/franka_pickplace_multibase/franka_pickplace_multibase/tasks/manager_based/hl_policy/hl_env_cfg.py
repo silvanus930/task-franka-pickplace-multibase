@@ -114,6 +114,11 @@ _GRASP_SYMS:        list[float] = [obj.grasp_sym                   for obj in _S
 _GRASP_YAW_OFFSETS: list[float] = [obj.effective_grasp_yaw_offset() for obj in _SCENE_CATALOG]
 _UPRIGHT_HEIGHTS:   list[float] = [obj.upright_height              for obj in _SCENE_CATALOG]
 _GRASP_OFFSET_LOCALS: list[tuple[float, float, float]] = [obj.grasp_offset_local for obj in _SCENE_CATALOG]
+_GRASP_LONG_AXIS_LOCALS: list[tuple[float, float, float]] = [
+    obj.grasp_long_axis_local for obj in _SCENE_CATALOG
+]
+_FOOTPRINT_XYS: list[tuple[float, float]] = [obj.footprint_xy for obj in _SCENE_CATALOG]
+_GRASP_YAW_FRAME_OFFSETS: list[float] = [obj.grasp_yaw_frame_offset for obj in _SCENE_CATALOG]
 _FOOTPRINT_RADII:   list[float] = [obj.footprint_radius              for obj in _SCENE_CATALOG]
 
 # Container drop marker config: visualise the bin opening as a blue rectangle.
@@ -159,6 +164,9 @@ class HLCommandsCfg:
         grasp_yaw_offsets=_GRASP_YAW_OFFSETS,
         upright_heights=_UPRIGHT_HEIGHTS,
         grasp_offset_locals=_GRASP_OFFSET_LOCALS,
+        grasp_long_axis_locals=_GRASP_LONG_AXIS_LOCALS,
+        footprint_xys=_FOOTPRINT_XYS,
+        grasp_yaw_frame_offsets=_GRASP_YAW_FRAME_OFFSETS,
         # Container drop mode: goal Z = rim + offset; no yaw gate.
         container_drop=True,
         container_retract_xy_offset=_C.retract_xy_offset_table,
@@ -234,6 +242,7 @@ class HLEventCfg:
             "container_interior_half_x":  _C.interior_half_x,
             "container_interior_half_y":  _C.interior_half_y,
             "container_drop_z_local":     _DROP_Z_LOCAL,
+            "center_drop":                True,
             "container_clearance":        _C.object_clearance,
             "object_spacing":             _C.object_spacing,
             "pose_cmd_name":              "ee_pose",

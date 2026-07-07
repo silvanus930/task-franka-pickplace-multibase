@@ -66,6 +66,26 @@ gym.register(
 )
 
 gym.register(
+    id="Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-OpportunisticPlace-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point":    f"{__name__}.hl_env_cfg_envhub:HLEnvCfg_Envhub_PLAY_OpportunisticPlace",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.ppo_cfg:LLPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-OpportunisticPlace-Video-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point":    f"{__name__}.hl_env_cfg_envhub:HLEnvCfg_Envhub_PLAY_OpportunisticPlace_VIDEO",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.ppo_cfg:LLPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

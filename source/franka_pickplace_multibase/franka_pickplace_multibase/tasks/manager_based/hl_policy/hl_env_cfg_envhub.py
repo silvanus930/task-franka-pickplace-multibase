@@ -248,6 +248,9 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         catalog_grasp_yaw = [obj.effective_grasp_yaw_offset() for obj in OBJECT_CATALOG[:num_catalog]]
         catalog_upright   = [obj.upright_height              for obj in OBJECT_CATALOG[:num_catalog]]
         catalog_grasp_off = [obj.grasp_offset_local           for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_grasp_long_axis = [obj.grasp_long_axis_local   for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_footprint_xy = [obj.footprint_xy               for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_frame_yaw_off = [obj.grasp_yaw_frame_offset    for obj in OBJECT_CATALOG[:num_catalog]]
 
         # ---- Commands: keep container-drop mode (same as base HLEnvCfg) ----
         # container_drop=True is the default from HLCommandsCfg; do NOT set False.
@@ -259,6 +262,9 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         self.commands.ee_pose.grasp_yaw_offsets = catalog_grasp_yaw
         self.commands.ee_pose.upright_heights   = catalog_upright
         self.commands.ee_pose.grasp_offset_locals = catalog_grasp_off
+        self.commands.ee_pose.grasp_long_axis_locals = catalog_grasp_long_axis
+        self.commands.ee_pose.footprint_xys = catalog_footprint_xy
+        self.commands.ee_pose.grasp_yaw_frame_offsets = catalog_frame_yaw_off
         # goal_pose_visualizer_cfg stays as _MARKER_CFG (container opening marker)
 
         # ---- Events: typed-scenario object reset + container placement ----
@@ -277,6 +283,7 @@ class HLEnvCfg_Envhub(HLEnvCfg):
                 "container_interior_half_x": _C.interior_half_x,
                 "container_interior_half_y": _C.interior_half_y,
                 "container_drop_z_local":    _DROP_Z_LOCAL,
+                "center_drop":               True,
             },
         )
 
@@ -500,6 +507,40 @@ class HLEnvCfg_Envhub_PLAY(HLEnvCfg_Envhub):
         self.scene.num_envs = 30
         self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False
+
+
+@configclass
+class HLEnvCfg_Envhub_PLAY_OpportunisticPlace(HLEnvCfg_Envhub_PLAY):
+    """Play variant with opportunistic in-bin placement during transport.
+
+  When an object lands inside the container during CARRY/LOWER/RELEASE, the
+  planner marks it placed and advances instead of recycling to PRE_GRASP.
+  ``object_dropped_mid_carry`` is also suppressed for objects already in the bin.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.commands.ee_pose.opportunistic_container_place = True
+
+
+@configclass
+class HLEnvCfg_Envhub_PLAY_OpportunisticPlace_VIDEO(HLEnvCfg_Envhub_PLAY_OpportunisticPlace):
+    """Multi-env video capture: opportunistic placement, HL logging, long episode.
+
+    Default ``num_envs=4`` for parallel smoke testing; eval-nav overrides via yaml.
+    Uses relaxed ``HLSafeTerminationsCfg`` so incidental container bumps do not
+    cut the recording short. Not for official benchmark scoring.
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.episode_length_s = 60.0
+        self.commands.ee_pose.enable_log = True
+        self.commands.ee_pose.log_env_id = -1  # log all envs when num_envs > 1
 
 
 @configclass

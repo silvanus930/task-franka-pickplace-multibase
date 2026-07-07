@@ -134,6 +134,21 @@ class HLPoseCommand(CommandTerm):
             dtype=torch.float32,
             device=self.device,
         )  # (M, 3)
+        self._grasp_long_axis_locals = torch.tensor(
+            _pad_vec(cfg.grasp_long_axis_locals, cfg.grasp_long_axis_local_default),
+            dtype=torch.float32,
+            device=self.device,
+        )  # (M, 3)
+        self._footprint_xy = torch.tensor(
+            _pad_vec(cfg.footprint_xys, cfg.footprint_xy_default),
+            dtype=torch.float32,
+            device=self.device,
+        )  # (M, 2)
+        self._grasp_yaw_frame_offsets = torch.tensor(
+            _pad(cfg.grasp_yaw_frame_offsets, cfg.grasp_yaw_frame_offset_default),
+            dtype=torch.float32,
+            device=self.device,
+        )  # (M,)
 
         # Per-env active catalog indices (N, M_active).
         # Default: identity mapping — slot m uses catalog object m.
@@ -206,6 +221,19 @@ class HLPoseCommand(CommandTerm):
             hurry_after_s        = cfg.hurry_after_s,
             hurry_scale          = cfg.hurry_scale,
             container_retract_xy_offset = cfg.container_retract_xy_offset,
+            opportunistic_container_place = cfg.opportunistic_container_place,
+            opportunistic_z_above_goal_max = cfg.opportunistic_z_above_goal_max,
+            container_interior_half_table_x = cfg.container_interior_half_table_x,
+            container_interior_half_table_y = cfg.container_interior_half_table_y,
+            container_floor_z = cfg.container_floor_z,
+            container_rim_z = cfg.container_rim_z,
+            ang_tol_pre_grasp = cfg.ang_tol_pre_grasp,
+            grasp_closing_axis = cfg.grasp_closing_axis,
+            grasp_yaw_frame_offset = cfg.grasp_yaw_frame_offset,
+            pre_grasp_yaw_tol = cfg.pre_grasp_yaw_tol,
+            grasp_yaw_flip_enabled = cfg.grasp_yaw_flip_enabled,
+            grasp_yaw_flip_after_retries = cfg.grasp_yaw_flip_after_retries,
+            grasp_yaw_flip_rad = cfg.grasp_yaw_flip_rad,
         )
 
         self.metrics["position_error"]    = torch.zeros(self.num_envs, device=self.device)
@@ -297,10 +325,16 @@ class HLPoseCommand(CommandTerm):
             cube_quat_w = all_quats[arange_n, cat_idx_slot0]  # (N, 4)
             sym0     = self._grasp_syms[cat_idx_slot0]          # (N,)
             yaw_off0 = self._grasp_yaw_offsets[cat_idx_slot0]   # (N,)
+            long_axis0 = self._grasp_long_axis_locals[cat_idx_slot0]
+            footprint0 = self._footprint_xy[cat_idx_slot0]
+            frame_off0 = self._grasp_yaw_frame_offsets[cat_idx_slot0]
         else:
             cube_quat_w = self._cubes[0].data.root_quat_w
             sym0     = self._grasp_syms[0].unsqueeze(0).expand(self.num_envs)
             yaw_off0 = self._grasp_yaw_offsets[0].unsqueeze(0).expand(self.num_envs)
+            long_axis0 = self._grasp_long_axis_locals[0].unsqueeze(0).expand(self.num_envs, 3)
+            footprint0 = self._footprint_xy[0].unsqueeze(0).expand(self.num_envs, 2)
+            frame_off0 = self._grasp_yaw_frame_offsets[0].unsqueeze(0).expand(self.num_envs)
 
         self.planner.reset(
             ids,
@@ -309,6 +343,9 @@ class HLPoseCommand(CommandTerm):
             cube_quat_w   = cube_quat_w,
             grasp_sym     = sym0,
             grasp_yaw_off = yaw_off0,
+            grasp_long_axis_local = long_axis0,
+            footprint_xy = footprint0,
+            grasp_frame_yaw_off = frame_off0,
         )
         self._grip_command[ids]  = 0.0
         self._stuck_warned[ids] = False
@@ -343,6 +380,9 @@ class HLPoseCommand(CommandTerm):
             cur_grasp_yaw_off = self._grasp_yaw_offsets[cat_for_task]  # (N,)
             cur_upright_h     = self._upright_heights[cat_for_task]    # (N,)
             cur_grasp_off_loc = self._grasp_offset_locals[cat_for_task]  # (N, 3)
+            cur_grasp_long_axis = self._grasp_long_axis_locals[cat_for_task]  # (N, 3)
+            cur_footprint_xy = self._footprint_xy[cat_for_task]  # (N, 2)
+            cur_frame_yaw_off = self._grasp_yaw_frame_offsets[cat_for_task]  # (N,)
         else:
             cube_pos_all  = torch.stack([c.data.root_pos_w  for c in self._cubes], dim=1)  # (N, M, 3)
             cube_quat_all = torch.stack([c.data.root_quat_w for c in self._cubes], dim=1)  # (N, M, 4)
@@ -354,6 +394,9 @@ class HLPoseCommand(CommandTerm):
             cur_grasp_yaw_off = self._grasp_yaw_offsets[task_idx]  # (N,)
             cur_upright_h     = self._upright_heights[task_idx]    # (N,)
             cur_grasp_off_loc = self._grasp_offset_locals[task_idx]  # (N, 3)
+            cur_grasp_long_axis = self._grasp_long_axis_locals[task_idx]  # (N, 3)
+            cur_footprint_xy = self._footprint_xy[task_idx]  # (N, 2)
+            cur_frame_yaw_off = self._grasp_yaw_frame_offsets[task_idx]  # (N,)
 
         finger_joint_ids = self.robot.find_joints("panda_finger_joint.*")[0]
         finger_open = self.robot.data.joint_pos[:, finger_joint_ids].mean(dim=-1)
@@ -376,6 +419,9 @@ class HLPoseCommand(CommandTerm):
             grasp_yaw_off = cur_grasp_yaw_off,
             upright_height = cur_upright_h,
             grasp_offset_local = cur_grasp_off_loc,
+            grasp_long_axis_local = cur_grasp_long_axis,
+            footprint_xy = cur_footprint_xy,
+            grasp_frame_yaw_off = cur_frame_yaw_off,
             finger_open   = finger_open,
         )
 
@@ -453,7 +499,8 @@ class HLPoseCommand(CommandTerm):
                     "[HL] env %d grasp_miss  obj=%d  orient=%s  "
                     "upright_h=%.3f  z_eff=%.4f  z_base=%.4f  "
                     "finger_open=%.4f  secure_err_xy=%.4f  aim_err_xy=%.4f  "
-                    "verify_corrected=%d  reason=%s  retry=%d/%d  -> PRE_GRASP",
+                    "verify_corrected=%d  reason=%s  retry=%d/%d  "
+                    "yaw_flip=%.0f°  -> PRE_GRASP",
                     i,
                     int(p._task_idx[i].item()),
                     orient,
@@ -467,6 +514,15 @@ class HLPoseCommand(CommandTerm):
                     reason_txt,
                     p._retry_count[i].item(),
                     p.max_retries,
+                    math.degrees(p._grasp_yaw_flip[i].item()),
+                )
+
+        if p._opportunistic_place.any():
+            for i in torch.where(p._opportunistic_place)[0].tolist():
+                _LOG.warning(
+                    "[HL] env %d opportunistic_place  obj=%d  -> advance to next object",
+                    i,
+                    int(p._opportunistic_place_obj[i].item()),
                 )
 
         if p._skip_event.any():
@@ -500,6 +556,25 @@ class HLPoseCommand(CommandTerm):
                 stage, STAGE_NAMES[stage], _fmt_xyz(self._target_pos_w[i]),
                 _fmt_xyz(ee_pos_w[i]), self._grip_command[i, 0].item(),
             )
+            if p._grasp_yaw_debug is not None and stage <= 2:
+                dbg = p._grasp_yaw_debug
+                _, _, ee_yaw = euler_xyz_from_quat(
+                    self.robot.data.body_quat_w[i:i + 1, self._body_idx]
+                )
+                _LOG.info(
+                    "[HL] env %d pre_grasp_pose  center=(%.3f,%.3f)  "
+                    "source=%s  object_yaw=%.1f°  target_yaw=%.1f°  ee_yaw=%.1f°  "
+                    "yaw_err=%.1f°  long_axis_w=(%.2f,%.2f,%.2f)",
+                    i,
+                    p._object_center_xy[i, 0].item(), p._object_center_xy[i, 1].item(),
+                    dbg.source[i],
+                    math.degrees(dbg.object_yaw[i].item()),
+                    math.degrees(dbg.target_yaw[i].item()),
+                    math.degrees(ee_yaw[0].item()),
+                    math.degrees(p._yaw_err[i].item()),
+                    dbg.long_axis_w[i, 0].item(), dbg.long_axis_w[i, 1].item(),
+                    dbg.long_axis_w[i, 2].item(),
+                )
             self._stuck_warned[i] = False
 
         stuck = (~p._track_ok) & (p._elapsed > self.cfg.stuck_warn_s) & ~self._stuck_warned
@@ -547,6 +622,25 @@ class HLPoseCommand(CommandTerm):
                 p._object_center_xy[i, 0].item(), p._object_center_xy[i, 1].item(),
                 p._grasp_aim_xy[i, 0].item(), p._grasp_aim_xy[i, 1].item(),
             )
+            if p._grasp_yaw_debug is not None:
+                dbg = p._grasp_yaw_debug
+                _LOG.info(
+                    "[HL] env %d grasp_yaw  source=%s  object_yaw=%.1f°  "
+                    "target_yaw=%.1f°  ee_yaw=%.1f°  yaw_err=%.1f°  "
+                    "long_axis_w=(%.3f,%.3f,%.3f)  closing_w=(%.3f,%.3f,%.3f)",
+                    i,
+                    dbg.source[i],
+                    math.degrees(dbg.object_yaw[i].item()),
+                    math.degrees(dbg.target_yaw[i].item()),
+                    math.degrees(
+                        euler_xyz_from_quat(
+                            self.robot.data.body_quat_w[i:i + 1, self._body_idx]
+                        )[2][0].item()
+                    ),
+                    math.degrees(p._yaw_err[i].item()),
+                    dbg.long_axis_w[i, 0].item(), dbg.long_axis_w[i, 1].item(), dbg.long_axis_w[i, 2].item(),
+                    dbg.closing_axis_w[i, 0].item(), dbg.closing_axis_w[i, 1].item(), dbg.closing_axis_w[i, 2].item(),
+                )
 
     def _get_cube_z_w(self, env_idx: int, task_idx_val: int) -> float:
         """Return the world-Z of the current task object for a given env (for logging)."""
@@ -575,14 +669,63 @@ class HLPoseCommand(CommandTerm):
             if not hasattr(self, "goal_pose_visualizer"):
                 self.goal_pose_visualizer = VisualizationMarkers(self.cfg.goal_pose_visualizer_cfg)
             self.goal_pose_visualizer.set_visibility(True)
-        elif hasattr(self, "goal_pose_visualizer"):
-            self.goal_pose_visualizer.set_visibility(False)
+            if self.cfg.grasp_yaw_debug_vis:
+                if not hasattr(self, "grasp_yaw_visualizer"):
+                    self.grasp_yaw_visualizer = VisualizationMarkers(
+                        self.cfg.grasp_yaw_visualizer_cfg
+                    )
+                self.grasp_yaw_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "goal_pose_visualizer"):
+                self.goal_pose_visualizer.set_visibility(False)
+            if hasattr(self, "grasp_yaw_visualizer"):
+                self.grasp_yaw_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event) -> None:
-        if not hasattr(self, "goal_pose_visualizer"):
+        if hasattr(self, "goal_pose_visualizer"):
+            marker_pos, marker_quat = self._goal_marker_pose_w()
+            self.goal_pose_visualizer.visualize(marker_pos, marker_quat)
+        if hasattr(self, "grasp_yaw_visualizer"):
+            self._visualize_grasp_yaw_debug()
+
+    def _visualize_grasp_yaw_debug(self) -> None:
+        """Draw object centre, long axis, and closing direction during approach."""
+        p = self.planner
+        dbg = p._grasp_yaw_debug
+        if dbg is None:
             return
-        marker_pos, marker_quat = self._goal_marker_pose_w()
-        self.goal_pose_visualizer.visualize(marker_pos, marker_quat)
+        in_approach = p.stage <= 2  # PRE_GRASP, DESCEND, GRASP
+        if not in_approach.any():
+            return
+
+        task_idx = p._task_idx
+        arange = torch.arange(self.num_envs, device=self.device)
+        if self._typed_mode:
+            cat = self._active_catalog_indices[arange, task_idx]
+            obj_pos = torch.stack([c.data.root_pos_w for c in self._cubes], dim=1)[arange, cat]
+        else:
+            obj_pos = torch.stack([c.data.root_pos_w for c in self._cubes], dim=1)[arange, task_idx]
+
+        z = obj_pos[:, 2] + 0.004
+        center = obj_pos.clone()
+        center[:, 2] = z
+        axis_len = 0.06
+        long_tip = center + dbg.long_axis_w * axis_len
+        long_tip[:, 2] = z
+        close_tip = center + dbg.closing_axis_w * (axis_len * 0.55)
+        close_tip[:, 2] = z
+
+        # 3 markers per env: center (0), long axis tip (1), closing tip (2).
+        n = self.num_envs
+        positions = torch.cat([center, long_tip, close_tip], dim=0)
+        orientations = torch.zeros(3 * n, 4, device=self.device)
+        orientations[:, 0] = 1.0
+        marker_indices = torch.cat([
+            torch.zeros(n, dtype=torch.long, device=self.device),
+            torch.ones(n, dtype=torch.long, device=self.device),
+            torch.full((n,), 2, dtype=torch.long, device=self.device),
+        ])
+        self.grasp_yaw_visualizer.visualize(positions, orientations, marker_indices=marker_indices)
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +777,38 @@ def make_container_marker_cfg(half_x: float, half_y: float, thickness: float) ->
 HL_GOAL_MARKER_CFG = make_goal_marker_cfg(cube_size=0.04, thickness=0.002)
 
 
+def make_grasp_yaw_debug_marker_cfg() -> VisualizationMarkersCfg:
+    """Markers for grasp-yaw debug: green=centre, red=long axis, blue=closing."""
+    return VisualizationMarkersCfg(
+        markers={
+            "center": sim_utils.SphereCfg(
+                radius=0.010,
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.1, 0.95, 0.2),
+                    emissive_color=(0.0, 0.35, 0.05),
+                ),
+            ),
+            "long_axis": sim_utils.SphereCfg(
+                radius=0.008,
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.95, 0.15, 0.1),
+                    emissive_color=(0.35, 0.05, 0.0),
+                ),
+            ),
+            "closing": sim_utils.SphereCfg(
+                radius=0.008,
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.15, 0.35, 0.95),
+                    emissive_color=(0.05, 0.10, 0.35),
+                ),
+            ),
+        },
+    ).replace(prim_path="/Visuals/HL/grasp_yaw")
+
+
+HL_GRASP_YAW_MARKER_CFG = make_grasp_yaw_debug_marker_cfg()
+
+
 @configclass
 class HLPoseCommandCfg(CommandTermCfg):
     """Configuration for :class:`HLPoseCommand`."""
@@ -669,6 +844,9 @@ class HLPoseCommandCfg(CommandTermCfg):
     grasp_yaw_offsets:  list[float] = []   # constant yaw offset (rad)
     upright_heights:    list[float] = []   # nominal standing height (m); 0 disables lying adjust
     grasp_offset_locals: list[tuple[float, float, float]] = []  # object-frame grasp aim offset (m)
+    grasp_long_axis_locals: list[tuple[float, float, float]] = []  # elongation axis for lying yaw
+    footprint_xys: list[tuple[float, float]] = []  # local (size_x, size_y) for PCA fallback
+    grasp_yaw_frame_offsets: list[float] = []  # per-object 0 or π/2 frame toggle (rad)
 
     # Scalar defaults used when the per-object lists are shorter than M.
     grasp_z_offset_default:   float = -0.01
@@ -676,6 +854,22 @@ class HLPoseCommandCfg(CommandTermCfg):
     grasp_yaw_offset_default: float = 0.0
     upright_height_default:   float = 0.0
     grasp_offset_local_default: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    grasp_long_axis_local_default: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    footprint_xy_default: tuple[float, float] = (0.0, 0.0)
+    grasp_yaw_frame_offset_default: float = 0.0
+
+    # Grasp-yaw alignment (see grasp_yaw.py).
+    grasp_closing_axis: str = "ee_x"  # verified in sim: close across short width needs +π/2
+    grasp_yaw_frame_offset: float = 0.0  # global extra offset (rad); use 0 or π/2
+    ang_tol_pre_grasp: float = 0.15
+    pre_grasp_yaw_tol: float = 0.12
+    grasp_yaw_debug_vis: bool = True
+    grasp_yaw_visualizer_cfg = HL_GRASP_YAW_MARKER_CFG
+
+    # Safe fallback: after N grasp failures, retry with +90° wrist yaw (elongated objects).
+    grasp_yaw_flip_enabled: bool = True
+    grasp_yaw_flip_after_retries: int = 2
+    grasp_yaw_flip_rad: float = math.pi / 2
 
     # Container drop mode: disables yaw gate; goal Z = bin rim target.
     container_drop: bool = False
@@ -696,7 +890,7 @@ class HLPoseCommandCfg(CommandTermCfg):
     pre_approach_z:    float = 0.10
     carry_z:           float = 0.22   # raised to clear container rim (~11 cm)
     grasp_z_offset:    float = -0.01  # kept for backward compat; use grasp_z_offset_default
-    release_z_offset:  float = -0.020
+    release_z_offset:  float = 0.0
     retract_approach_z: float = 0.07
     pos_tol:           float = 0.045
     ang_tol:           float = 0.45
@@ -724,7 +918,7 @@ class HLPoseCommandCfg(CommandTermCfg):
     place_yaw_gate:      float = 10.0   # effectively disabled in container mode
     max_step:            float = 0.065
     pre_grasp_settle_s:   float = 1.5
-    pre_grasp_settle_ang: float = 0.6
+    pre_grasp_settle_ang: float = 0.15
     lift_anchor_radius:   float = 0.05
     place_settle_s:       float = 0.3
     place_settle_max:     float = 0.8
@@ -743,6 +937,15 @@ class HLPoseCommandCfg(CommandTermCfg):
     hurry_after_s:        float = 25.0
     hurry_scale:          float = 0.6
     container_retract_xy_offset: tuple[float, float] = (-0.05, 0.12)
+
+    # Opportunistic placement: during CARRY/LOWER/RELEASE, treat early bin
+    # landings as successful placement instead of carry-miss retries.
+    opportunistic_container_place: bool = False
+    opportunistic_z_above_goal_max: float = 0.10
+    container_interior_half_table_x: float = 0.10
+    container_interior_half_table_y: float = 0.14
+    container_floor_z: float = 0.035
+    container_rim_z: float = 0.11
 
     enable_log:    bool  = False
     log_interval:  int   = 100

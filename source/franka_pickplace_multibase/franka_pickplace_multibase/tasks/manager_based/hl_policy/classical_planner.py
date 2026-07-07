@@ -108,40 +108,56 @@ class Stage(IntEnum):
 STAGE_NAMES: tuple[str, ...] = tuple(s.name for s in Stage)
 
 
+def object_settled_in_container(
+    cube_pos_w: torch.Tensor,
+    goal_pos_w: torch.Tensor,
+    place_verify_xy: float,
+    z_above_goal_max: float = 0.10,
+) -> torch.Tensor:
+    """Return per-env mask: object centre is near the bin drop target (loose check).
+
+    Used for suppressing false carry-drop failures. Prefer
+    :func:`object_inside_container_interior` for opportunistic placement.
+    """
+    xy_ok = torch.norm(cube_pos_w[:, :2] - goal_pos_w[:, :2], dim=-1) < place_verify_xy
+    z_ok = cube_pos_w[:, 2] <= (goal_pos_w[:, 2] + z_above_goal_max)
+    return xy_ok & z_ok
+
+
+def object_inside_container_interior(
+    cube_pos_w: torch.Tensor,
+    goal_pos_w: torch.Tensor,
+    half_table_x: float,
+    half_table_y: float,
+    floor_z: float,
+    rim_z: float,
+    xy_margin: float = 0.80,
+) -> torch.Tensor:
+    """Return per-env mask: object centre is inside the bin interior (not on rim).
+
+    Uses axis-aligned bounds in table XY (same frame as ``objects_in_container``).
+    """
+    hx = half_table_x * xy_margin
+    hy = half_table_y * xy_margin
+    dx = (cube_pos_w[:, 0] - goal_pos_w[:, 0]).abs()
+    dy = (cube_pos_w[:, 1] - goal_pos_w[:, 1]).abs()
+    xy_ok = (dx < hx) & (dy < hy)
+    z_ok = (cube_pos_w[:, 2] >= floor_z) & (cube_pos_w[:, 2] <= rim_z + 0.02)
+    return xy_ok & z_ok
+
+
 # 0 = open, 1 = closed
 _STAGE_GRIP: list[float] = [0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _grasp_yaw(
-    obj_quat: torch.Tensor,
-    sym: torch.Tensor,
-    yaw_off: torch.Tensor,
-) -> torch.Tensor:
-    """Compute grasp yaw snapped to the object's symmetry period.
-
-    Args:
-        obj_quat: ``(N, 4)`` object quaternion (w, x, y, z).
-        sym:      ``(N,)`` symmetry period in radians.
-                  ``0`` → rotationally symmetric; return neutral wrist (0 rad).
-        yaw_off:  ``(N,)`` constant yaw offset added after folding (rad).
-
-    Returns:
-        ``(N,)`` grasp yaw in world frame.
-    """
-    _, _, yaw = euler_xyz_from_quat(obj_quat)
-    yaw = yaw + yaw_off
-
-    # Rotationally symmetric objects: neutral wrist.
-    neutral_mask = sym <= 0.0
-    half = sym * 0.5
-    # Avoid division by zero for neutral case.
-    safe_sym = torch.where(neutral_mask, torch.ones_like(sym), sym)
-    folded = (yaw + 0.25 * safe_sym) % safe_sym - 0.25 * safe_sym
-    return torch.where(neutral_mask, torch.zeros_like(yaw), folded)
+from .grasp_yaw import (
+    ClosingAxis,
+    GripperFrameConfig,
+    GraspYawDebug,
+    compute_grasp_yaw,
+    compute_grasp_yaw_symmetry,
+    normalize_yaw,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +192,7 @@ class PickPlacePlanner:
         pre_approach_z:    float = 0.12,
         carry_z:           float = 0.22,   # raised to clear container rim
         grasp_z_offset:    float = -0.01,  # default, overridden per-object
-        release_z_offset:  float = -0.020,
+        release_z_offset:  float = 0.0,
         retract_approach_z: float = 0.12,
         pos_tol:           float = 0.015,
         ang_tol:           float = 0.08,
@@ -204,8 +220,9 @@ class PickPlacePlanner:
         container_drop:    bool  = True,
         place_yaw_gate:    float = 10.0,   # effectively disabled in container mode
         max_step:          float = 0.05,
-        pre_grasp_settle_s:   float = 5.0,
-        pre_grasp_settle_ang: float = 0.6,
+        pre_grasp_settle_s:   float = 1.5,
+        pre_grasp_settle_ang: float = 0.15,
+        pre_grasp_yaw_tol:    float = 0.12,
         lift_anchor_radius:   float = 0.05,
         place_settle_s:       float = 0.3,
         place_settle_max:     float = 0.8,
@@ -231,6 +248,21 @@ class PickPlacePlanner:
         hurry_after_s:        float = 25.0,  # longer budget per object
         hurry_scale:          float = 0.6,
         container_retract_xy_offset: tuple[float, float] = (-0.05, 0.12),
+        # Opportunistic placement: count early bin landings during transport.
+        opportunistic_container_place: bool = False,
+        opportunistic_z_above_goal_max: float = 0.10,
+        container_interior_half_table_x: float = 0.10,
+        container_interior_half_table_y: float = 0.14,
+        container_floor_z: float = 0.035,
+        container_rim_z: float = 0.11,
+        # Grasp-yaw alignment (see grasp_yaw.py).
+        ang_tol_pre_grasp: float = 0.15,
+        grasp_closing_axis: str = "ee_x",
+        grasp_yaw_frame_offset: float = 0.0,
+        # After N grasp failures, add +90° yaw flip for elongated objects (safe fallback).
+        grasp_yaw_flip_enabled: bool = True,
+        grasp_yaw_flip_after_retries: int = 2,
+        grasp_yaw_flip_rad: float = math.pi / 2,
     ) -> None:
         self.num_envs = num_envs
         self.device   = device
@@ -267,6 +299,7 @@ class PickPlacePlanner:
         self.max_step            = max_step
         self.pre_grasp_settle_s   = pre_grasp_settle_s
         self.pre_grasp_settle_ang = pre_grasp_settle_ang
+        self.pre_grasp_yaw_tol    = pre_grasp_yaw_tol
         self.lift_anchor_radius   = lift_anchor_radius
         self.place_settle_s       = place_settle_s
         self.place_settle_max     = place_settle_max
@@ -290,6 +323,21 @@ class PickPlacePlanner:
         self.hurry_after_s         = hurry_after_s
         self.hurry_scale           = hurry_scale
         self.container_retract_xy_offset = container_retract_xy_offset
+        self.opportunistic_container_place = opportunistic_container_place
+        self.opportunistic_z_above_goal_max = opportunistic_z_above_goal_max
+        self.container_interior_half_table_x = container_interior_half_table_x
+        self.container_interior_half_table_y = container_interior_half_table_y
+        self.container_floor_z = container_floor_z
+        self.container_rim_z = container_rim_z
+        self.ang_tol_pre_grasp = ang_tol_pre_grasp
+        closing = ClosingAxis.EE_X if grasp_closing_axis == "ee_x" else ClosingAxis.EE_Y
+        self._gripper_frame = GripperFrameConfig(
+            closing_axis=closing,
+            yaw_offset=grasp_yaw_frame_offset,
+        )
+        self.grasp_yaw_flip_enabled = grasp_yaw_flip_enabled
+        self.grasp_yaw_flip_after_retries = grasp_yaw_flip_after_retries
+        self.grasp_yaw_flip_rad = grasp_yaw_flip_rad
 
         N, dev = num_envs, device
         self._stage       = torch.full((N,), int(Stage.PRE_GRASP), dtype=torch.long, device=dev)
@@ -332,6 +380,11 @@ class PickPlacePlanner:
         self._cur_grasp_yaw_off = torch.zeros(N, device=dev)
         self._cur_upright_height = torch.zeros(N, device=dev)
         self._cur_grasp_offset_local = torch.zeros(N, 3, device=dev)
+        self._cur_grasp_long_axis_local = torch.zeros(N, 3, device=dev)
+        self._cur_footprint_xy = torch.zeros(N, 2, device=dev)
+        self._cur_grasp_frame_yaw_off = torch.zeros(N, device=dev)
+        self._grasp_yaw_flip = torch.zeros(N, device=dev)
+        self._grasp_yaw_debug: GraspYawDebug | None = None
         self._cur_grasp_z_eff = torch.full((N,), grasp_z_offset, device=dev)
         self._grasp_orient_state = torch.zeros(N, dtype=torch.long, device=dev)
         self._grasp_verify_xy_ok = torch.ones(N, dtype=torch.bool, device=dev)
@@ -353,7 +406,7 @@ class PickPlacePlanner:
             pos_tol_grasp, pos_tol_retract, pos_tol,
         ]
         ang_tol_stages = [
-            ang_tol, ang_tol_approach, ang_tol_grasp,
+            ang_tol_pre_grasp, ang_tol_approach, ang_tol_grasp,
             ang_tol_transport, ang_tol_transport, ang_tol_transport,
             ang_tol_grasp, ang_tol_retract, ang_tol,
         ]
@@ -368,9 +421,13 @@ class PickPlacePlanner:
 
         self._pos_err    = torch.zeros(N, device=dev)
         self._ang_err    = torch.zeros(N, device=dev)
+        self._yaw_err    = torch.zeros(N, device=dev)
         self._track_ok   = torch.zeros(N, dtype=torch.bool, device=dev)
         self._grasp_miss      = torch.zeros(N, dtype=torch.bool, device=dev)
         self._place_miss      = torch.zeros(N, dtype=torch.bool, device=dev)
+        self._opportunistic_place     = torch.zeros(N, dtype=torch.bool, device=dev)
+        self._opportunistic_place_obj = torch.full((N,), -1, dtype=torch.long, device=dev)
+        self._lift_confirmed = torch.zeros(N, dtype=torch.bool, device=dev)
         self._stage_changed  = torch.zeros(N, dtype=torch.bool, device=dev)
         self._pos_tol_eff    = torch.full((N,), pos_tol, device=dev)
         self._ang_tol_eff    = torch.full((N,), ang_tol, device=dev)
@@ -406,11 +463,11 @@ class PickPlacePlanner:
         self._place_bias_xy[env_mask] = 0.0
         self._place_bias_yaw[env_mask] = 0.0
         self._lower_retries[env_mask] = 0
+        self._lift_confirmed[env_mask] = False
+        self._grasp_yaw_flip[env_mask] = 0.0
 
         env_ids = torch.where(env_mask)[0]
-        cur_sym = self._cur_grasp_sym[env_ids]
-        cur_off = self._cur_grasp_yaw_off[env_ids]
-        self._yaw[env_ids] = _grasp_yaw(cube_quat_w[env_ids], cur_sym, cur_off)
+        self._yaw[env_ids] = self._resolve_grasp_yaw(cube_quat_w[env_ids])
 
     def _advance_to_next_object(
         self,
@@ -542,6 +599,52 @@ class PickPlacePlanner:
         grasp_y = torch.where(use_offset, grasp_point_w[:, 1], cube_pos_w[:, 1])
         return grasp_x, grasp_y
 
+    def _elongated_object_mask(self) -> torch.Tensor:
+        """True for objects where a ±90° yaw flip can fix a mis-aligned grasp."""
+        has_catalog = torch.norm(self._cur_grasp_long_axis_local, dim=-1) > 1e-6
+        fp = self._cur_footprint_xy
+        is_box = (
+            (fp[:, 0] > 1e-6)
+            & (fp[:, 1] > 1e-6)
+            & ((fp[:, 0] - fp[:, 1]).abs() > 0.003)
+        )
+        round_sym = self._cur_grasp_sym <= 1e-6
+        return (has_catalog | is_box) & (~round_sym)
+
+    def _resolve_grasp_yaw(self, obj_quat: torch.Tensor) -> torch.Tensor:
+        """Object-aligned wrist yaw for PRE_GRASP; stores debug vectors for logging."""
+        yaw_off = self._cur_grasp_yaw_off + self._cur_grasp_frame_yaw_off
+        yaw, self._grasp_yaw_debug = compute_grasp_yaw(
+            obj_quat,
+            self._cur_grasp_sym,
+            yaw_off,
+            self._cur_grasp_long_axis_local,
+            self._cur_footprint_xy,
+            self._cur_upright_height,
+            self._gripper_frame,
+        )
+        yaw = normalize_yaw(yaw + self._grasp_yaw_flip)
+        if self._grasp_yaw_debug is not None:
+            self._grasp_yaw_debug.target_yaw = yaw
+        return yaw
+
+    def _apply_yaw_flip_on_grasp_miss(self, env_mask: torch.Tensor) -> None:
+        """After repeated failures, rotate wrist yaw +90° and retry (elongated objects only)."""
+        if not self.grasp_yaw_flip_enabled or not env_mask.any():
+            return
+        eligible = env_mask & self._elongated_object_mask()
+        should_flip = eligible & (
+            self._retry_count >= self.grasp_yaw_flip_after_retries
+        )
+        if not should_flip.any():
+            return
+        flip_val = torch.tensor(self.grasp_yaw_flip_rad, device=self.device, dtype=torch.float32)
+        self._grasp_yaw_flip = torch.where(
+            should_flip,
+            flip_val,
+            self._grasp_yaw_flip,
+        )
+
     def _check_grasp_secure(
         self,
         cube_pos_w: torch.Tensor,
@@ -579,13 +682,24 @@ class PickPlacePlanner:
         cube_quat_w: torch.Tensor | None = None,
         grasp_sym:   torch.Tensor | None = None,
         grasp_yaw_off: torch.Tensor | None = None,
+        grasp_long_axis_local: torch.Tensor | None = None,
+        footprint_xy: torch.Tensor | None = None,
+        grasp_frame_yaw_off: torch.Tensor | None = None,
     ) -> None:
         """Reset selected envs to PRE_GRASP, task_idx = 0."""
         if env_ids.numel() == 0:
             return
         ids = env_ids
-        sym = grasp_sym[ids] if grasp_sym is not None else self._cur_grasp_sym[ids]
-        yaw_off = grasp_yaw_off[ids] if grasp_yaw_off is not None else self._cur_grasp_yaw_off[ids]
+        if grasp_sym is not None:
+            self._cur_grasp_sym[ids] = grasp_sym[ids]
+        if grasp_yaw_off is not None:
+            self._cur_grasp_yaw_off[ids] = grasp_yaw_off[ids]
+        if grasp_long_axis_local is not None:
+            self._cur_grasp_long_axis_local[ids] = grasp_long_axis_local[ids]
+        if footprint_xy is not None:
+            self._cur_footprint_xy[ids] = footprint_xy[ids]
+        if grasp_frame_yaw_off is not None:
+            self._cur_grasp_frame_yaw_off[ids] = grasp_frame_yaw_off[ids]
 
         self._stage[ids]          = int(Stage.PRE_GRASP)
         self._elapsed[ids]        = 0.0
@@ -600,7 +714,7 @@ class PickPlacePlanner:
         self._target_quat[ids]    = 0.0
         self._target_quat[ids, 0] = 1.0
         self._yaw[ids]            = (
-            _grasp_yaw(cube_quat_w[ids], sym, yaw_off)
+            self._resolve_grasp_yaw(cube_quat_w[ids])
             if cube_quat_w is not None else torch.zeros(ids.numel(), device=self.device)
         )
         self._yaw_k[ids]          = 0
@@ -615,6 +729,7 @@ class PickPlacePlanner:
         self._place_bias_xy[ids]  = 0.0
         self._place_bias_yaw[ids] = 0.0
         self._lower_retries[ids]  = 0
+        self._grasp_yaw_flip[ids] = 0.0
         self._episode_t[ids]      = 0.0
         self._cur_grasp_z_eff[ids] = self._cur_grasp_z_off[ids]
         self._grasp_orient_state[ids] = 1
@@ -641,6 +756,9 @@ class PickPlacePlanner:
         grasp_yaw_off: torch.Tensor | None = None,  # (N,)
         upright_height: torch.Tensor | None = None,  # (N,)
         grasp_offset_local: torch.Tensor | None = None,  # (N, 3)
+        grasp_long_axis_local: torch.Tensor | None = None,  # (N, 3)
+        footprint_xy: torch.Tensor | None = None,  # (N, 2)
+        grasp_frame_yaw_off: torch.Tensor | None = None,  # (N,) per-object 0 or π/2
         finger_open:   torch.Tensor | None = None,  # (N,) mean finger joint opening (m)
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """One planner step.  Returns ``(end_pos_w, end_quat_w, grip)``."""
@@ -656,21 +774,31 @@ class PickPlacePlanner:
             self._cur_upright_height.copy_(upright_height)
         if grasp_offset_local is not None:
             self._cur_grasp_offset_local.copy_(grasp_offset_local)
+        if grasp_long_axis_local is not None:
+            self._cur_grasp_long_axis_local.copy_(grasp_long_axis_local)
+        if footprint_xy is not None:
+            self._cur_footprint_xy.copy_(footprint_xy)
+        if grasp_frame_yaw_off is not None:
+            self._cur_grasp_frame_yaw_off.copy_(grasp_frame_yaw_off)
 
-        approaching = self._stage <= int(Stage.DESCEND)
-        if approaching.any():
+        # Yaw is set and settled in PRE_GRASP only; frozen before DESCEND/GRASP.
+        in_pre_grasp = self._stage == int(Stage.PRE_GRASP)
+        if in_pre_grasp.any():
             self._update_grasp_orientation(cube_quat_w, cube_pos_w)
-            new_yaw = _grasp_yaw(cube_quat_w, self._cur_grasp_sym, self._cur_grasp_yaw_off)
-            self._yaw = torch.where(approaching, new_yaw, self._yaw)
+            new_yaw = self._resolve_grasp_yaw(cube_quat_w)
+            self._yaw = torch.where(in_pre_grasp, new_yaw, self._yaw)
+        elif self._stage <= int(Stage.DESCEND):
+            self._update_grasp_orientation(cube_quat_w, cube_pos_w)
         else:
             self._cur_grasp_z_eff.copy_(self._cur_grasp_z_off)
 
         grasp_x, grasp_y = self._update_grasp_aim_point(cube_pos_w, cube_quat_w)
 
-        # Wrist-unwind for non-symmetric objects (same logic as before, uses cube symmetry).
+        # Wrist-unwind: skip when long-axis yaw is active (±π/2 would break alignment).
+        use_long_axis = torch.norm(self._cur_grasp_long_axis_local, dim=-1) > 1e-6
         if wrist_angle is not None:
             self._yaw_switch_cd = (self._yaw_switch_cd - 1).clamp_(min=0)
-            unwind_ok = self._stage <= int(Stage.DESCEND)
+            unwind_ok = (self._stage <= int(Stage.DESCEND)) & (~use_long_axis)
             ready = (self._yaw_switch_cd == 0) & unwind_ok
             over_pos = ready & (wrist_angle >  self.wrist_soft_limit) & (self._yaw_k > -self.yaw_k_max)
             over_neg = ready & (wrist_angle < -self.wrist_soft_limit) & (self._yaw_k <  self.yaw_k_max)
@@ -684,9 +812,9 @@ class PickPlacePlanner:
                     self._yaw_switch_cd,
                 )
 
-        # Track in-gripper XY offset while holding (for cube-centre goal compensation).
+        # Track in-gripper XY offset while holding (table placement only).
         holding = (self._stage >= int(Stage.GRASP)) & (self._stage <= int(Stage.LOWER))
-        if holding.any():
+        if holding.any() and not self.container_drop:
             off = cube_pos_w[:, :2] - ee_pos_w[:, :2]
             self._place_offset = torch.where(holding.unsqueeze(-1), off, self._place_offset)
 
@@ -719,6 +847,10 @@ class PickPlacePlanner:
 
         pos_err  = torch.norm(ee_pos_w - end_pos, dim=-1)
         ang_err  = quat_error_magnitude(ee_quat_w, end_quat)
+        _, _, ee_yaw = euler_xyz_from_quat(ee_quat_w)
+        self._yaw_err = torch.abs(
+            torch.atan2(torch.sin(ee_yaw - self._yaw), torch.cos(ee_yaw - self._yaw))
+        )
         in_aim_phase = self._stage <= int(Stage.GRASP)
         self._aim_error_xy = torch.where(
             in_aim_phase,
@@ -736,10 +868,39 @@ class PickPlacePlanner:
         self._grasp_miss.fill_(False)
         self._place_miss.fill_(False)
         self._skip_event.fill_(False)
+        self._opportunistic_place.fill_(False)
+        self._opportunistic_place_obj.fill_(-1)
 
         arange = torch.arange(self.num_envs, device=self.device)
         cur_obj = self._task_idx
         object_active = ~(self._object_placed[arange, cur_obj] | self._object_abandoned[arange, cur_obj])
+
+        # Opportunistic in-bin placement: only after a confirmed lift, during drop.
+        if self.opportunistic_container_place and self.container_drop:
+            in_drop_phase = (
+                (self._stage == int(Stage.LOWER))
+                | (self._stage == int(Stage.RELEASE))
+            )
+            inside = object_inside_container_interior(
+                cube_pos_w,
+                goal_pos_w,
+                self.container_interior_half_table_x,
+                self.container_interior_half_table_y,
+                self.container_floor_z,
+                self.container_rim_z,
+            )
+            opp_mask = in_drop_phase & inside & self._lift_confirmed & object_active
+            if opp_mask.any():
+                self._opportunistic_place.copy_(opp_mask)
+                self._opportunistic_place_obj[opp_mask] = self._task_idx[opp_mask]
+                self._object_placed[opp_mask, self._task_idx[opp_mask]] = True
+                self._retry_count[opp_mask] = 0
+                self._advance_to_next_object(opp_mask, cube_quat_w)
+                cur_obj = self._task_idx
+                object_active = ~(
+                    self._object_placed[arange, cur_obj]
+                    | self._object_abandoned[arange, cur_obj]
+                )
 
         in_grasp   = self._stage == int(Stage.GRASP)
         in_release = self._stage == int(Stage.RELEASE)
@@ -765,8 +926,13 @@ class PickPlacePlanner:
             torch.zeros_like(self._pre_settle),
         )
         pre_settle_req = self.pre_grasp_settle_s * hurry_mul
+        yaw_aligned = self._yaw_err < self.pre_grasp_yaw_tol
         pre_grasp_settled = in_pre_grasp & (
-            ((self._pre_settle >= pre_settle_req) & (ang_err < self.pre_grasp_settle_ang))
+            (
+                (self._pre_settle >= pre_settle_req)
+                & (ang_err < self.pre_grasp_settle_ang)
+                & yaw_aligned
+            )
             | (self._pre_settle >= 3.0 * pre_settle_req)
         )
 
@@ -852,16 +1018,24 @@ class PickPlacePlanner:
             & (cube_pos_w[:, 2] < self.min_carry_cube_z)
             & (drop_gap > self.carry_drop_gap)
         )
+        if self.opportunistic_container_place and self.container_drop:
+            settled = object_settled_in_container(
+                cube_pos_w,
+                goal_pos_w,
+                self.place_verify_xy,
+                self.opportunistic_z_above_goal_max,
+            )
+            carry_missed = carry_missed & ~settled
         grasp_miss   = (grasp_failed | carry_missed) & (self._retry_count < self.max_retries)
         if grasp_miss.any():
             self._grasp_miss.copy_(grasp_miss)
             self._retry_count[grasp_miss] += 1
+            self._apply_yaw_flip_on_grasp_miss(grasp_miss)
+            self._lift_confirmed[grasp_miss] = False
             self._stage[grasp_miss]       = int(Stage.PRE_GRASP)
             self._elapsed[grasp_miss]     = 0.0
             self._pre_settle[grasp_miss]  = 0.0
-            cur_sym = self._cur_grasp_sym[grasp_miss]
-            cur_off = self._cur_grasp_yaw_off[grasp_miss]
-            self._yaw[grasp_miss] = _grasp_yaw(cube_quat_w[grasp_miss], cur_sym, cur_off)
+            self._yaw[grasp_miss] = self._resolve_grasp_yaw(cube_quat_w[grasp_miss])
 
         grasp_still_failing = grasp_failed | carry_missed
         grasp_exhausted = (
@@ -875,6 +1049,12 @@ class PickPlacePlanner:
 
         if can_advance.any():
             adv = can_advance & ~grasp_miss & ~grasp_exhausted
+            lifted = adv & (old_stage == int(Stage.LIFT))
+            self._lift_confirmed = torch.where(
+                lifted,
+                torch.ones_like(self._lift_confirmed),
+                self._lift_confirmed,
+            )
             self._elapsed = torch.where(adv, torch.zeros_like(self._elapsed), self._elapsed)
             self._stage   = torch.where(adv, self._next_stage[self._stage], self._stage)
 
@@ -906,9 +1086,7 @@ class PickPlacePlanner:
                 self._stage[place_missed]        = int(Stage.PRE_GRASP)
                 self._elapsed[place_missed]      = 0.0
                 self._pre_settle[place_missed]   = 0.0
-                cur_sym_m = self._cur_grasp_sym[place_missed]
-                cur_off_m = self._cur_grasp_yaw_off[place_missed]
-                self._yaw[place_missed] = _grasp_yaw(cube_quat_w[place_missed], cur_sym_m, cur_off_m)
+                self._yaw[place_missed] = self._resolve_grasp_yaw(cube_quat_w[place_missed])
                 self._place_offset[place_missed] = 0.0
                 self._yaw_offset[place_missed]   = 0.0
                 self._retreat_ctr[place_missed]  = 0
@@ -975,18 +1153,25 @@ class PickPlacePlanner:
         per_z = self._cur_grasp_z_eff
 
         if self.container_drop:
-            # Container mode: LOWER targets the drop height (goal_z = rim + offset),
-            # RELEASE slightly lower; no in-gripper yaw compensation at goal.
-            goal_yaw_sym = torch.zeros_like(gz)  # neutral orientation for drop
+            # Keep grasp yaw through CARRY/LOWER/RELEASE so TCP stays over object centre.
+            yaw = self._yaw
         else:
-            goal_yaw_sym = _grasp_yaw(goal_quat_w, self._cur_grasp_sym, self._cur_grasp_yaw_off) \
-                           - self._yaw_offset - self._place_bias_yaw
+            goal_yaw_sym = (
+                compute_grasp_yaw_symmetry(goal_quat_w, self._cur_grasp_sym, self._cur_grasp_yaw_off)
+                - self._yaw_offset
+                - self._place_bias_yaw
+            )
+            use_goal_ori = self._stage >= int(Stage.CARRY)
+            yaw = torch.where(use_goal_ori, goal_yaw_sym, self._yaw)
 
-        use_goal_ori = self._stage >= int(Stage.CARRY)
-        yaw = torch.where(use_goal_ori, goal_yaw_sym, self._yaw)
-
-        # Wrist-unwind (only meaningful when grasp_sym > 0).
-        yaw = yaw + self._yaw_k.to(yaw.dtype) * (0.5 * math.pi)
+        use_long_axis = torch.norm(self._cur_grasp_long_axis_local, dim=-1) > 1e-6
+        in_grasp_approach = self._stage <= int(Stage.GRASP)
+        skip_unwind = use_long_axis & in_grasp_approach
+        yaw = yaw + torch.where(
+            skip_unwind,
+            torch.zeros_like(yaw),
+            self._yaw_k.to(yaw.dtype) * (0.5 * math.pi),
+        )
 
         # Z targets:
         z_pre     = cz + self.pre_approach_z + H
@@ -1014,15 +1199,20 @@ class PickPlacePlanner:
         # XY targets.
         use_goal = self._stage >= int(Stage.CARRY)
         placing  = use_goal & (self._stage <= int(Stage.RELEASE))
-        gx_c = gx - self._place_offset[:, 0] - self._place_bias_xy[:, 0]
-        gy_c = gy - self._place_offset[:, 1] - self._place_bias_xy[:, 1]
+        if self.container_drop:
+            # Command TCP directly over bin centre; object drops straight down on release.
+            ex_place = gx
+            ey_place = gy
+        else:
+            ex_place = gx - self._place_offset[:, 0] - self._place_bias_xy[:, 0]
+            ey_place = gy - self._place_offset[:, 1] - self._place_bias_xy[:, 1]
 
         is_lift = self._stage == int(Stage.LIFT)
         d = torch.stack([grasp_x, grasp_y], dim=-1) - self._lift_xy
         n = torch.norm(d, dim=-1, keepdim=True)
         lift_xy = self._lift_xy + d * torch.clamp(self.lift_anchor_radius / (n + 1e-6), max=1.0)
-        ex = torch.where(placing, gx_c, torch.where(use_goal, gx, torch.where(is_lift, lift_xy[:, 0], grasp_x)))
-        ey = torch.where(placing, gy_c, torch.where(use_goal, gy, torch.where(is_lift, lift_xy[:, 1], grasp_y)))
+        ex = torch.where(placing, ex_place, torch.where(use_goal, gx, torch.where(is_lift, lift_xy[:, 0], grasp_x)))
+        ey = torch.where(placing, ey_place, torch.where(use_goal, gy, torch.where(is_lift, lift_xy[:, 1], grasp_y)))
 
         # Container RETRACT: shift XY toward the robot before lifting out of the bin.
         is_retract = self._stage == int(Stage.RETRACT)

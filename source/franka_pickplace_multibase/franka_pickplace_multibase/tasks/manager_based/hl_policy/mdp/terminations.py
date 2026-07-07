@@ -355,6 +355,29 @@ def object_dropped_mid_carry(
     retries_exhausted = planner._retry_count >= planner.max_retries
     dropped = in_carry & retries_exhausted & (cur_obj_z < drop_height_world)
 
+    if planner.container_drop:
+        from ..classical_planner import object_inside_container_interior
+
+        obj_pos_all = torch.stack(
+            [env.scene[cfg.name].data.root_pos_w for cfg in object_cfgs],
+            dim=1,
+        )
+        if getattr(pose_term, "_typed_mode", False):
+            active_cat = pose_term._active_catalog_indices[arange, task_idx]
+            cur_obj_pos = obj_pos_all[arange, active_cat]
+        else:
+            cur_obj_pos = obj_pos_all[arange, task_idx]
+        goal_pos_w = pose_term.goal_pos_w[arange, task_idx]
+        in_bin = object_inside_container_interior(
+            cur_obj_pos,
+            goal_pos_w,
+            planner.container_interior_half_table_x,
+            planner.container_interior_half_table_y,
+            planner.container_floor_z,
+            planner.container_rim_z,
+        )
+        dropped = dropped & ~in_bin
+
     if enable_log and dropped.any():
         _ensure_log_configured()
         for i in torch.where(dropped)[0].tolist():

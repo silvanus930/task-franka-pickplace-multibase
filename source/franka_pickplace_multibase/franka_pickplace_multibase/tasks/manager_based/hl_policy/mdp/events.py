@@ -44,6 +44,7 @@ def reset_scattered_objects_into_container(
     container_pos_range: dict[str, tuple[float, float]] | None = None,
     container_clearance: float = 0.10,
     object_spacing: float = 0.03,
+    center_drop: bool = True,
 ) -> None:
     """Scatter M objects on the desk, randomise the container position, and set goals.
 
@@ -188,7 +189,9 @@ def reset_scattered_objects_into_container(
     goal_rot_local = torch.zeros(N, M, 4, device=dev)
     goal_rot_local[:, :, 0] = 1.0  # identity quaternion
 
-    slot_offsets = container_drop_slot_offsets_table(M, half_table_x, half_table_y)
+    slot_offsets = container_drop_slot_offsets_table(
+        M, half_table_x, half_table_y, center_only=center_drop
+    )
     for m, (jx, jy) in enumerate(slot_offsets):
         goal_pos_local[:, m, 0] = cx_l + jx
         goal_pos_local[:, m, 1] = cy_l + jy
@@ -243,6 +246,7 @@ def reset_typed_objects_from_scenario(
     container_interior_half_x: float = 0.14,
     container_interior_half_y: float = 0.10,
     container_drop_z_local: float = 0.13,
+    center_drop: bool = True,
 ) -> None:
     """Reset catalog objects for one episode using :class:`TypedPrebakedScenarioStrategy`.
 
@@ -324,7 +328,9 @@ def reset_typed_objects_from_scenario(
         half_table_x, half_table_y = container_to_table_interior_half_extents(
             container_interior_half_x, container_interior_half_y
         )
-        slot_offsets = container_drop_slot_offsets_table(M_active, half_table_x, half_table_y)
+        slot_offsets = container_drop_slot_offsets_table(
+            M_active, half_table_x, half_table_y, center_only=center_drop
+        )
 
         goal_pos_local = torch.zeros(N, M_active, 3, device=dev)
         goal_rot_local = torch.zeros(N, M_active, 4, device=dev)
