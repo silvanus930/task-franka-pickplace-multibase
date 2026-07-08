@@ -1,0 +1,45 @@
+# Long video capture for opportunistic in-bin placement (4 envs, 1 episode).
+#
+# 60 s wall-clock budget @ step_dt≈0.033 s → up to 1800 frames.
+# Uses relaxed container-displacement checks so the run is not cut short.
+#
+# Prereq (headless Vulkan): task-franka-pickplace-multibase/scripts/install_isaac_headless_libs.sh
+#   export VK_ICD_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+#
+# Usage (from eval-nav/):
+#   NEPHER_EVAL_IN_PROCESS=1 python scripts/evaluate.py \
+#     --config configs/task-franka-pickplace-multibase-opportunistic-place-video.yaml \
+#     --headless \
+#     --checkpoint ../task-franka-pickplace-multibase/best_policy/best_policy.pt
+#
+# Output: logs/franka-pickplace-multibase-hl-opportunistic-place-video/eval_run_*/videos/eval/*.mp4
+
+task_name: "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-OpportunisticPlace-Video-v0"
+task_module: "franka_pickplace_multibase"
+category: "manipulation"
+
+env_scenes:
+  - env_id: "franka-pickplace-multibase-sample"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 1
+# 60 s × 30 Hz ≈ 1800 steps — longest practical single-episode capture.
+max_episode_steps: 2500
+max_episode_time_s: 60.0
+
+num_envs: 4
+
+task_type: "manipulation.pick_place"
+scoring_version: "v2"
+
+log_dir: "logs/franka-pickplace-multibase-hl-opportunistic-place-video"
+enable_logging: true
+enable_cameras: true
+video: true
+video_length: 2500
+
+timeout_seconds: null
+policy_path: "default"

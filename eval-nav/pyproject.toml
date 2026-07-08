@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eval-nav"
+version = "0.1.0"
+description = "Navigation Evaluation Framework for IsaacLab"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary"}
+authors = [
+    {name = "Nepher Robotics"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "gymnasium>=0.29.0",
+    "nepher>=0.1.1",
+    "numpy>=1.20.0",
+    "pyyaml>=6.0",
+    "requests>=2.28.0",
+    "torch>=2.0.0",
+]
+
+[project.scripts]
+eval-nav = "eval_nav.scripts.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eval_nav*"]
+

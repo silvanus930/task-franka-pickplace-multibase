@@ -1,0 +1,40 @@
+# Single failed benchmark case — video replay (scenario 4, 0/3 in production eval).
+# Slightly relaxed vs strict benchmark: container_displaced 2 cm → 8 cm (Video task).
+# Other failure terms unchanged. Time budget same as production (30 s).
+#
+# Usage (from eval-nav/):
+#   NEPHER_EVAL_IN_PROCESS=1 python scripts/evaluate.py \
+#     --config configs/task-franka-pickplace-multibase-opportunistic-place-failed1-video.yaml \
+#     --headless \
+#     --checkpoint ../task-franka-pickplace-multibase/best_policy/best_policy.pt
+
+task_name: "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-OpportunisticPlace-Video-v0"
+task_module: "franka_pickplace_multibase"
+category: "manipulation"
+
+env_scenes:
+  - env_id: "franka-pickplace-multibase-sample"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 1
+max_episode_steps: 1500
+max_episode_time_s: 30.0
+
+num_envs: 2
+env_config:
+  scenario_ids: [5, 3]
+
+task_type: "manipulation.pick_place"
+scoring_version: "v2"
+
+log_dir: "logs/franka-pickplace-multibase-hl-opportunistic-place-failed1-video"
+enable_logging: true
+enable_cameras: true
+video: true
+video_length: 1500
+
+timeout_seconds: null
+policy_path: "default"

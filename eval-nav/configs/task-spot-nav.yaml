@@ -1,0 +1,39 @@
+# Evaluation configuration for task-spot-nav
+#
+# Evaluates the Spot student goal-navigation policy on obstacle-terrain-v2.
+# Uses navigation.spot / v4 scoring: success-rate-amplified quality with
+# per-episode time efficiency, locomotion stability, and path directness.
+#
+# The student env spawns a depth camera — Isaac Sim must be launched with
+# camera rendering enabled (handled automatically by scripts/evaluate.py).
+
+enable_cameras: true
+
+task_name: "Nepher-Spot-Nav-Envhub-Student-Play-v0"
+task_module: "spotnav"
+
+env_scenes:
+  - env_id: "obstacle-terrain-v2"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 3
+max_episode_steps: 200
+
+# Physical time budget — used by v4 scorer for decimation-invariant time efficiency.
+max_episode_time_s: 60.0
+
+num_envs: 300
+
+# Scorer: Spot goal navigation, version 4
+# task_type selects the scorer family; scoring_version selects the algorithm.
+# navigation.spot supports: v2 (waypoint), v3 (goal), v4 (goal + directness)
+task_type: "navigation.spot"
+scoring_version: "v4"
+
+log_dir: "logs/spot-nav"
+enable_logging: true
+timeout_seconds: null
+policy_path: "default"

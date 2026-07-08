@@ -1,0 +1,47 @@
+# Focused video capture for the first 10 production failed benchmark cases.
+#
+# Source run:
+#   logs/franka-pickplace-multibase-hl-opportunistic-place/eval_run_20260707_225544
+#
+# These scenario ids had 0/3 successes in the strict 30-env production eval:
+#   3, 7, 8, 9, 10, 11, 12, 13, 14, 15
+#
+# Usage (from eval-nav/):
+#   NEPHER_EVAL_IN_PROCESS=1 python scripts/evaluate.py \
+#     --config configs/task-franka-pickplace-multibase-opportunistic-place-failed10-video.yaml \
+#     --headless \
+#     --checkpoint ../task-franka-pickplace-multibase/best_policy/best_policy.pt
+#
+# Output:
+#   logs/franka-pickplace-multibase-hl-opportunistic-place-failed10-video/eval_run_*/videos/eval/*.mp4
+
+task_name: "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-OpportunisticPlace-v0"
+task_module: "franka_pickplace_multibase"
+category: "manipulation"
+
+env_scenes:
+  - env_id: "franka-pickplace-multibase-sample"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 1
+max_episode_steps: 1500
+max_episode_time_s: 30.0
+
+num_envs: 10
+env_config:
+  scenario_ids: [3, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+task_type: "manipulation.pick_place"
+scoring_version: "v2"
+
+log_dir: "logs/franka-pickplace-multibase-hl-opportunistic-place-failed10-video"
+enable_logging: true
+enable_cameras: true
+video: true
+video_length: 1500
+
+timeout_seconds: null
+policy_path: "default"

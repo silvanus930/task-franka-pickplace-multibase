@@ -1,0 +1,30 @@
+# Evaluation configuration for task-animal-nav
+#
+# Evaluates the ANYmal B waypoint navigation policy on waypoint-benchmark-v1.
+# Uses navigation.leatherback / v1 scoring: success rate (70%) + time
+# efficiency (30%).  No locomotion telemetry is required.
+
+task_name: "Nepher-Animal-WaypointNav-Envhub-Play-v0"
+task_module: "animalnav"
+
+env_scenes:
+  - env_id: "waypoint-benchmark-v1"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 2
+max_episode_steps: 900
+
+num_envs: 10
+
+# Scorer: leatherback / ANYmal-B waypoint navigation, version 1
+# navigation.leatherback supports: v1
+task_type: "navigation.leatherback"
+scoring_version: "v1"
+
+log_dir: "logs/animal-nav"
+enable_logging: true
+timeout_seconds: null
+policy_path: "default"

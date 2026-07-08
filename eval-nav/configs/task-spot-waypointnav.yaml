@@ -1,0 +1,30 @@
+# Evaluation configuration for task-spot-waypointnav
+#
+# Evaluates the Spot waypoint benchmark using the waypoint-benchmark-v1 scene.
+# Uses navigation.spot / v2 scoring: success + time efficiency + locomotion
+# quality (gait regularity, speed compliance, body stability).
+
+task_name: "Nepher-Spot-WaypointNav-Envhub-Play-v0"
+task_module: "spotwaypointnav"
+
+env_scenes:
+  - env_id: "waypoint-benchmark-v1"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 1
+max_episode_steps: 450
+
+num_envs: 86
+
+# Scorer: Spot waypoint navigation, version 2
+# navigation.spot supports: v2 (waypoint), v3 (goal), v4 (goal + directness)
+task_type: "navigation.spot"
+scoring_version: "v2"
+
+log_dir: "logs/spot-waypointnav"
+enable_logging: true
+timeout_seconds: null
+policy_path: "default"

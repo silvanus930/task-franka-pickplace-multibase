@@ -1,0 +1,29 @@
+# Evaluation config: strict 30-env benchmark + safe HL mustard timing tweaks.
+# Same scoring as task-franka-pickplace-multibase.yaml; only the gym task differs.
+
+task_name: "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-TimingSafe-v0"
+task_module: "franka_pickplace_multibase"
+category: "manipulation"
+
+env_scenes:
+  - env_id: "franka-pickplace-multibase-sample"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 3
+max_episode_steps: 1500
+
+max_episode_time_s: 30.0
+
+num_envs: 30
+
+task_type: "manipulation.pick_place"
+scoring_version: "v2"
+
+log_dir: "logs/franka-pickplace-multibase-hl-timing-safe"
+enable_logging: true
+enable_cameras: false
+timeout_seconds: null
+policy_path: "default"

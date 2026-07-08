@@ -1,0 +1,38 @@
+# Diagnostic 30-env eval: opportunistic placement + relaxed container displacement.
+# NOT for official benchmark scoring.
+#
+# Relaxed vs strict opportunistic eval:
+#   container_displaced XY  0.08 m  (strict: 0.02 m)
+#   container_displaced yaw 0.35 rad (strict: 0.10 rad)
+#
+# Usage (from eval-nav/):
+#   NEPHER_EVAL_IN_PROCESS=1 python scripts/evaluate.py \
+#     --config configs/task-franka-pickplace-multibase-opportunistic-place-safe.yaml \
+#     --headless \
+#     --checkpoint ../task-franka-pickplace-multibase/best_policy/best_policy.pt
+
+task_name: "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-OpportunisticPlace-Safe-v0"
+task_module: "franka_pickplace_multibase"
+category: "manipulation"
+
+env_scenes:
+  - env_id: "franka-pickplace-multibase-sample"
+    scene: 0
+
+seeds:
+  - 42
+
+num_episodes: 3
+max_episode_steps: 1500
+max_episode_time_s: 30.0
+
+num_envs: 30
+
+task_type: "manipulation.pick_place"
+scoring_version: "v2"
+
+log_dir: "logs/franka-pickplace-multibase-hl-opportunistic-place-safe"
+enable_logging: true
+enable_cameras: false
+timeout_seconds: null
+policy_path: "default"
