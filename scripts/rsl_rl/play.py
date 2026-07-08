@@ -37,6 +37,12 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Evaluate a trained Franka LL EE-tracking policy.")
 parser.add_argument("--video", action="store_true", default=False, help="Record video during evaluation.")
 parser.add_argument("--video_length", type=int, default=300, help="Number of steps to record.")
+parser.add_argument(
+    "--video_warmup_steps",
+    type=int,
+    default=50,
+    help="Sim steps to run before capturing frames (primes headless renderer).",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Override number of parallel environments.")
 parser.add_argument("--task", type=str, default="Nepher-Franka-PickPlace-LL-Play-v0", help="Registered gym task ID.")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="Agent config entry point key.")
@@ -79,6 +85,52 @@ import franka_pickplace_multibase.tasks  # noqa: F401
 import policy_paths  # isort: skip
 
 
+class _ManualVideoRecorder:
+    """Record MP4 frames without gymnasium RecordVideo (Isaac Sim 5.1 SD-graph safe)."""
+
+    def __init__(self, folder: str, video_length: int, warmup_steps: int, fps: float) -> None:
+        self.folder = folder
+        self.video_length = video_length
+        self.warmup_steps = max(0, warmup_steps)
+        self.fps = max(1.0, fps)
+        self.frames: list = []
+        self._primed = False
+
+    def _prime_renderer(self, base_env) -> None:
+        if self._primed:
+            return
+        for _ in range(5):
+            base_env.sim.render()
+        for _ in range(10):
+            frame = base_env.render()
+            if frame is not None and frame.size > 0 and frame.any():
+                break
+        self._primed = True
+
+    def maybe_capture(self, base_env, step_idx: int) -> None:
+        if step_idx < self.warmup_steps:
+            return
+        if len(self.frames) >= self.video_length:
+            return
+        if not self._primed:
+            self._prime_renderer(base_env)
+        frame = base_env.render()
+        if frame is not None and frame.size > 0:
+            self.frames.append(frame)
+
+    def save(self) -> str | None:
+        if not self.frames:
+            print("[WARN] No video frames captured.")
+            return None
+        os.makedirs(self.folder, exist_ok=True)
+        out_path = os.path.join(self.folder, "rl-video-step-0.mp4")
+        import imageio
+
+        imageio.mimsave(out_path, self.frames, fps=self.fps)
+        print(f"[INFO] Saved video ({len(self.frames)} frames) to: {out_path}")
+        return out_path
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Load checkpoint and run the LL policy in the simulator."""
@@ -112,18 +164,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
-    if args_cli.video:
-        video_kwargs = {
-            "video_folder": os.path.join(policy_paths.BEST_POLICY_DIR, "videos", "play"),
-            "step_trigger": lambda step: step == 0,
-            "video_length": args_cli.video_length,
-            "disable_logger": True,
-        }
-        print("[INFO] Recording video.")
-        print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
-
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    video_recorder = None
+    if args_cli.video:
+        video_folder = os.path.join(policy_paths.BEST_POLICY_DIR, "videos", "play")
+        video_recorder = _ManualVideoRecorder(
+            folder=video_folder,
+            video_length=args_cli.video_length,
+            warmup_steps=args_cli.video_warmup_steps,
+            fps=1.0 / env.unwrapped.step_dt,
+        )
+        print("[INFO] Manual video recording enabled (avoids gym RecordVideo SD-graph crash).")
+        print_dict(
+            {
+                "video_folder": video_folder,
+                "video_length": args_cli.video_length,
+                "video_warmup_steps": args_cli.video_warmup_steps,
+                "fps": video_recorder.fps,
+            },
+            nesting=4,
+        )
 
     print(f"[INFO] Loading model checkpoint: {resume_path}")
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -196,9 +257,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                         print(f"[INFO] env {i}: task failure — resetting")
                     episode_steps[i] = 0
 
-        if args_cli.video:
+        if video_recorder is not None:
+            video_recorder.maybe_capture(env.unwrapped, timestep)
             timestep += 1
-            if timestep >= args_cli.video_length:
+            if timestep >= video_recorder.warmup_steps + video_recorder.video_length:
                 break
         elif args_cli.max_steps is not None:
             timestep += 1
@@ -222,6 +284,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         f"drop={eval_metrics['drop']}, avg_episode_length={avg_episode_length:.2f}, "
         f"success_rate={success_rate:.3f}"
     )
+
+    if video_recorder is not None:
+        video_recorder.save()
 
     env.close()
 
