@@ -82,7 +82,7 @@ For video recording in headless mode, pass `--video`; `play.py` automatically
 enables cameras for Isaac Lab rendering.
 
 ```bash
-python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --headless --video --video_length 300
+python scripts/rsl_rl/play.py --task=Nepher-Franka-PickPlace-HL-Multibase-EnvhubSafePlay-v0 --headless --video --video_length 1500
 ```
 
 ## Multi-Base Integration (EnvHub)

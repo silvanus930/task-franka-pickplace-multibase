@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORT="${PORT:-3080}"
+PORT="${PORT:-3000}"
 HOST="${HOST:-0.0.0.0}"
 
 if ss -tln 2>/dev/null | grep -q ":${PORT} "; then
