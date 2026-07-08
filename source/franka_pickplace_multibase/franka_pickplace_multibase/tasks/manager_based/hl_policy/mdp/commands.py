@@ -564,7 +564,7 @@ class HLPoseCommand(CommandTerm):
                 _LOG.info(
                     "[HL] env %d pre_grasp_pose  center=(%.3f,%.3f)  "
                     "source=%s  object_yaw=%.1f°  target_yaw=%.1f°  ee_yaw=%.1f°  "
-                    "yaw_err=%.1f°  long_axis_w=(%.2f,%.2f,%.2f)",
+                    "yaw_err=%.1f°  width_align=%.2f  long_axis_w=(%.2f,%.2f,%.2f)",
                     i,
                     p._object_center_xy[i, 0].item(), p._object_center_xy[i, 1].item(),
                     dbg.source[i],
@@ -572,6 +572,7 @@ class HLPoseCommand(CommandTerm):
                     math.degrees(dbg.target_yaw[i].item()),
                     math.degrees(ee_yaw[0].item()),
                     math.degrees(p._yaw_err[i].item()),
+                    dbg.width_alignment[i].item(),
                     dbg.long_axis_w[i, 0].item(), dbg.long_axis_w[i, 1].item(),
                     dbg.long_axis_w[i, 2].item(),
                 )
@@ -627,7 +628,8 @@ class HLPoseCommand(CommandTerm):
                 _LOG.info(
                     "[HL] env %d grasp_yaw  source=%s  object_yaw=%.1f°  "
                     "target_yaw=%.1f°  ee_yaw=%.1f°  yaw_err=%.1f°  "
-                    "long_axis_w=(%.3f,%.3f,%.3f)  closing_w=(%.3f,%.3f,%.3f)",
+                    "width_align=%.2f  long_axis_w=(%.3f,%.3f,%.3f)  "
+                    "closing_w=(%.3f,%.3f,%.3f)",
                     i,
                     dbg.source[i],
                     math.degrees(dbg.object_yaw[i].item()),
@@ -638,6 +640,7 @@ class HLPoseCommand(CommandTerm):
                         )[2][0].item()
                     ),
                     math.degrees(p._yaw_err[i].item()),
+                    dbg.width_alignment[i].item(),
                     dbg.long_axis_w[i, 0].item(), dbg.long_axis_w[i, 1].item(), dbg.long_axis_w[i, 2].item(),
                     dbg.closing_axis_w[i, 0].item(), dbg.closing_axis_w[i, 1].item(), dbg.closing_axis_w[i, 2].item(),
                 )
@@ -861,7 +864,7 @@ class HLPoseCommandCfg(CommandTermCfg):
     # Grasp-yaw alignment (see grasp_yaw.py).
     grasp_closing_axis: str = "ee_x"  # verified in sim: close across short width needs +π/2
     grasp_yaw_frame_offset: float = 0.0  # global extra offset (rad); use 0 or π/2
-    ang_tol_pre_grasp: float = 0.15
+    ang_tol_pre_grasp: float = 0.45
     pre_grasp_yaw_tol: float = 0.12
     grasp_yaw_debug_vis: bool = True
     grasp_yaw_visualizer_cfg = HL_GRASP_YAW_MARKER_CFG
@@ -918,7 +921,7 @@ class HLPoseCommandCfg(CommandTermCfg):
     place_yaw_gate:      float = 10.0   # effectively disabled in container mode
     max_step:            float = 0.065
     pre_grasp_settle_s:   float = 1.5
-    pre_grasp_settle_ang: float = 0.15
+    pre_grasp_settle_ang: float = 0.6
     lift_anchor_radius:   float = 0.05
     place_settle_s:       float = 0.3
     place_settle_max:     float = 0.8

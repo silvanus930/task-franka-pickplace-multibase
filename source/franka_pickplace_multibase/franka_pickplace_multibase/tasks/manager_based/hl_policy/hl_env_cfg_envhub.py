@@ -533,6 +533,31 @@ class HLEnvCfg_Envhub_PLAY_OpportunisticPlace(HLEnvCfg_Envhub_PLAY):
 
 
 @configclass
+class HLEnvCfg_Envhub_PLAY_SAFE(HLEnvCfg_Envhub_PLAY):
+    """30-env play variant with relaxed ``container_displaced`` checks.
+
+    Uses :class:`HLSafeTerminationsCfg` (8 cm XY / 0.35 rad yaw) so incidental
+    bin bumps do not dominate failures.  Fall, drop, and planner exhaustion
+    terminations stay strict.  **Not for official benchmark scoring** — use
+    ``HLEnvCfg_Envhub_PLAY`` for tournament comparison.
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+
+@configclass
+class HLEnvCfg_Envhub_PLAY_OpportunisticPlace_SAFE(HLEnvCfg_Envhub_PLAY_OpportunisticPlace):
+    """Opportunistic placement + relaxed container displacement (30-env diagnostic).
+
+    Combines :class:`HLEnvCfg_Envhub_PLAY_OpportunisticPlace` with
+    :class:`HLSafeTerminationsCfg`.  Use this to measure grasp/place throughput
+    without ``CONTAINER_DISPLACED`` ending most episodes at 2 cm / 0.10 rad.
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+
+@configclass
 class HLEnvCfg_Envhub_PLAY_OpportunisticPlace_VIDEO(HLEnvCfg_Envhub_PLAY_OpportunisticPlace):
     """Multi-env video capture: opportunistic placement, HL logging, long episode.
 
