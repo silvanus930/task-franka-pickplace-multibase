@@ -30,8 +30,7 @@ globally when the USD mesh frame differs from the catalog assumption.
 Long-axis estimation priority
 -----------------------------
 1. **Rectangular boxes** (``footprint_x ≠ footprint_y``): score local X/Y/Z by
-   ``‖proj_xy‖ × extent`` and use the best **in-plane** axis (never body-yaw +
-   catalog π/2, which aligned the gripper **along** the long edge).
+   ``‖proj_xy‖ × (fp_x, fp_y, upright_height)`` — handles object0 upright vs lying.
 2. **Catalog elongation axis** (mustard bottle): used when footprint is round and
    the axis lies in the table plane.
 3. Body yaw from the object quaternion (symmetry-folded fallback when upright).
@@ -94,7 +93,6 @@ class GraspYawDebug:
     target_yaw: torch.Tensor          # (N,) commanded wrist yaw (rad)
     long_axis_w: torch.Tensor         # (N, 3) unit long axis in world frame
     closing_axis_w: torch.Tensor      # (N, 3) unit closing direction in world XY
-    width_alignment: torch.Tensor     # (N,) |dot(closing, long)|; 0 is across width, 1 is along length
     source: list[str]                 # len N, LongAxisSource value per env
 
 
@@ -146,68 +144,6 @@ def estimate_long_axis_local(
     return axis, valid
 
 
-def _box_world_axes(
-    obj_quat: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(world_axes, xy_norm)`` for local X/Y/Z."""
-    n = obj_quat.shape[0]
-    device = obj_quat.device
-    dtype = obj_quat.dtype
-    cardinals = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(n, 3, 3)
-    flat = cardinals.reshape(n * 3, 3)
-    quat_rep = obj_quat.repeat_interleave(3, dim=0)
-    world_axes = normalize(quat_apply(quat_rep, flat)).reshape(n, 3, 3)
-    xy_norm = torch.norm(world_axes[:, :, :2], dim=-1)
-    return world_axes, xy_norm
-
-
-def _box_grasp_heading(
-    obj_quat: torch.Tensor,
-    footprint_xy: torch.Tensor,
-    upright_height: torch.Tensor,
-    frame: GripperFrameConfig,
-) -> tuple[torch.Tensor, torch.Tensor, bool]:
-    """Pick the dominant in-plane box axis for top-down grasp yaw.
-
-    Always uses the best **horizontal** local axis (X/Y/Z) scored by
-    ``‖proj_xy‖ × extent``.  This avoids the old body-yaw + catalog-π/2 path,
-    which often collapsed to the **long-axis heading** and made the gripper
-    close **along** the length instead of across the width.
-    """
-    n = obj_quat.shape[0]
-    device = obj_quat.device
-
-    fp_x = footprint_xy[:, 0]
-    fp_y = footprint_xy[:, 1]
-    z_extent = upright_height.clamp(min=1e-6)
-
-    world_axes, xy_norm = _box_world_axes(obj_quat)
-    scores = xy_norm * torch.stack([fp_x, fp_y, z_extent], dim=-1)
-
-    in_plane = xy_norm >= frame.upright_xy_norm_min
-    scores = torch.where(in_plane, scores, torch.full_like(scores, -1.0))
-    best_idx = scores.argmax(dim=-1)
-    arange = torch.arange(n, device=device)
-    long_w = world_axes[arange, best_idx]
-    long_yaw = torch.atan2(long_w[:, 1], long_w[:, 0])
-
-    # If nothing projects into the table plane, fall back to the larger footprint
-    # edge even when nearly vertical (still better than body-yaw + π/2).
-    none_in_plane = ~in_plane.any(dim=-1)
-    if none_in_plane.any():
-        long_local_y = fp_y >= fp_x
-        fallback_idx = torch.where(long_local_y, 1, 0).long()
-        fb_w = world_axes[arange, fallback_idx]
-        long_w = torch.where(none_in_plane.unsqueeze(-1), fb_w, long_w)
-        long_yaw = torch.where(
-            none_in_plane,
-            torch.atan2(fb_w[:, 1], fb_w[:, 0]),
-            long_yaw,
-        )
-
-    return long_w, long_yaw, True
-
-
 def _pick_best_long_axis_world(
     obj_quat: torch.Tensor,
     long_axis_local: torch.Tensor,
@@ -217,10 +153,12 @@ def _pick_best_long_axis_world(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str]]:
     """Pick the object long axis projected into the table XY plane.
 
-    * **Rectangular boxes** — best in-plane local axis (X/Y/Z) by extent score;
-      never body-yaw + catalog π/2 (that path closed **along** the long edge).
-    * **Round / catalog objects** (mustard bottle) — catalog elongation axis
-      when its XY projection is strong; body-yaw when upright.
+    * **Rectangular boxes** (``footprint_x ≠ footprint_y``): score each local body
+      axis by ``‖proj_xy‖ × extent`` where extent is ``(fp_x, fp_y, upright_h)``.
+      This handles object0 sugar box both upright (long = local Y) and lying
+      (long = local Z height axis) without a fixed catalog axis.
+    * **Round / catalog objects** (mustard bottle): use catalog elongation axis
+      when its XY projection is strong; fall back to body yaw when upright.
     """
     n = obj_quat.shape[0]
     device = obj_quat.device
@@ -235,61 +173,46 @@ def _pick_best_long_axis_world(
     catalog_w = normalize(quat_apply(obj_quat, normalize(long_axis_local)))
     catalog_xy = torch.norm(catalog_w[:, :2], dim=-1)
 
-    long_w = torch.zeros(n, 3, device=device, dtype=dtype)
-    xy_norm_best = torch.zeros(n, device=device, dtype=dtype)
-    upright_mask = torch.zeros(n, dtype=torch.bool, device=device)
+    cardinals = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(n, 3, 3)
+    flat = cardinals.reshape(n * 3, 3)
+    quat_rep = obj_quat.repeat_interleave(3, dim=0)
+    world_axes = normalize(quat_apply(quat_rep, flat)).reshape(n, 3, 3)
+    xy_norm = torch.norm(world_axes[:, :, :2], dim=-1)
 
-    if is_box.any():
-        box_long, _box_yaw, _ = _box_grasp_heading(
-            obj_quat, footprint_xy, upright_height, frame,
-        )
-        long_w = torch.where(is_box.unsqueeze(-1), box_long, long_w)
-        xy_norm_best = torch.where(
-            is_box,
-            torch.norm(box_long[:, :2], dim=-1),
-            xy_norm_best,
-        )
+    z_extent = upright_height.clamp(min=1e-6)
+    weights = torch.stack([fp_x, fp_y, z_extent], dim=-1)
+    scores = xy_norm * weights
+    best_body_idx = scores.argmax(dim=-1)
+    arange = torch.arange(n, device=device)
+    long_from_body = world_axes[arange, best_body_idx]
+    body_best_xy = xy_norm[arange, best_body_idx]
+
+    long_w = long_from_body
+    xy_norm_best = body_best_xy
 
     is_round = has_catalog & (~is_box)
-    if is_round.any():
-        upright_catalog = is_round & (catalog_xy < frame.upright_xy_norm_min)
-        use_catalog_lying = is_round & (~upright_catalog) & (catalog_xy >= frame.upright_xy_norm_min)
-        long_w = torch.where(use_catalog_lying.unsqueeze(-1), catalog_w, long_w)
-        xy_norm_best = torch.where(use_catalog_lying, catalog_xy, xy_norm_best)
-        upright_mask = torch.where(is_round, upright_catalog | upright_mask, upright_mask)
+    upright_catalog = is_round & (catalog_xy < frame.upright_xy_norm_min)
+    use_catalog_lying = is_round & (~upright_catalog) & (catalog_xy >= frame.upright_xy_norm_min)
+    long_w = torch.where(use_catalog_lying.unsqueeze(-1), catalog_w, long_w)
+    xy_norm_best = torch.where(use_catalog_lying, catalog_xy, xy_norm_best)
 
-    # Legacy footprint fallback for non-box objects without catalog axis.
-    needs_fp_fallback = (~is_box) & (~has_catalog) & has_fp
-    if needs_fp_fallback.any():
-        cardinals = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(n, 3, 3)
-        flat = cardinals.reshape(n * 3, 3)
-        quat_rep = obj_quat.repeat_interleave(3, dim=0)
-        world_axes = normalize(quat_apply(quat_rep, flat)).reshape(n, 3, 3)
-        xy_norm = torch.norm(world_axes[:, :, :2], dim=-1)
-        long_local_y = fp_y >= fp_x
-        primary_idx = torch.where(long_local_y, 1, 0).long()
-        arange = torch.arange(n, device=device)
-        fp_long = world_axes[arange, primary_idx]
-        fp_xy = xy_norm[arange, primary_idx]
-        long_w = torch.where(needs_fp_fallback.unsqueeze(-1), fp_long, long_w)
-        xy_norm_best = torch.where(needs_fp_fallback, fp_xy, xy_norm_best)
-        fp_upright = needs_fp_fallback & (fp_xy < frame.upright_xy_norm_min)
-        upright_mask = upright_mask | fp_upright
+    upright_mask = upright_catalog | (xy_norm_best < frame.upright_xy_norm_min)
 
     sources: list[str] = []
     for i in range(n):
-        if is_box[i]:
-            sources.append(LongAxisSource.FOOTPRINT_BOX.value)
-        elif upright_mask[i]:
+        if upright_mask[i]:
             sources.append(LongAxisSource.BODY_YAW.value)
-        elif is_round[i] and catalog_xy[i] >= frame.upright_xy_norm_min:
+        elif is_box[i]:
+            sources.append(LongAxisSource.FOOTPRINT_BOX.value)
+        elif use_catalog_lying[i]:
             sources.append(LongAxisSource.CATALOG.value)
         elif has_fp[i]:
             sources.append(LongAxisSource.FOOTPRINT.value)
         else:
             sources.append(LongAxisSource.BODY_YAW.value)
 
-    return long_w, upright_mask, is_box, sources
+    has_any = is_box | has_catalog | has_fp
+    return long_w, upright_mask, has_any, sources
 
 
 def object_long_axis_world(
@@ -315,17 +238,13 @@ def compute_object_yaw_from_pose(
         ``upright_mask`` – ``(N,)`` bool, long-axis XY projection is degenerate.
         ``sources``      – list of :class:`LongAxisSource` names, len ``N``.
     """
-    long_w, upright_mask, is_box, sources = _pick_best_long_axis_world(
+    long_w, upright_mask, _has_any, sources = _pick_best_long_axis_world(
         obj_quat, long_axis_local, footprint_xy, upright_height, frame,
     )
 
     long_yaw = torch.atan2(long_w[:, 1], long_w[:, 0])
     body_yaw, _, _ = euler_xyz_from_quat(obj_quat)
-    object_yaw = torch.where(
-        is_box,
-        long_yaw,
-        torch.where(upright_mask, body_yaw, long_yaw),
-    )
+    object_yaw = torch.where(upright_mask, body_yaw, long_yaw)
 
     return object_yaw, long_w, upright_mask, sources
 
@@ -347,7 +266,7 @@ def compute_grasp_yaw(
         yaw_off:           ``(N,)`` manual/catalog yaw bias (rad).
         long_axis_local:   ``(N, 3)`` catalog elongation axis (may be zero).
         footprint_xy:      ``(N, 2)`` optional local footprint for PCA fallback.
-        frame:             Gripper frame convention; defaults to Franka EE-X closing.
+        frame:             Gripper frame convention; defaults to Franka EE-Y closing.
 
     Returns:
         ``(target_yaw, debug)`` – wrist yaw in world frame, normalized to ``[-π, π]``.
@@ -363,48 +282,49 @@ def compute_grasp_yaw(
         obj_quat, long_axis_local, footprint_xy, upright_height, frame,
     )
 
-    fp_x = footprint_xy[:, 0]
-    fp_y = footprint_xy[:, 1]
-    has_fp = (fp_x > 1e-6) & (fp_y > 1e-6)
-    is_box = has_fp & ((fp_x - fp_y).abs() > 0.003)
-    has_catalog = torch.norm(long_axis_local, dim=-1) > 1e-6
-
-    # Boxes always use in-plane long axis + EE closing offset (never sym + yaw_off).
-    # Catalog yaw_off (incl. auto π/2 from footprint) is for round/upright sym path only.
-    long_aligned_path = is_box | ((~upright_mask) & has_catalog)
-
-    closing_offset = torch.full_like(object_yaw, frame.closing_axis_offset)
-    aligned_long = object_yaw + frame.yaw_offset + closing_offset
-    target_long = normalize_yaw(_fold_long_axis_yaw(aligned_long))
-
-    # Upright / round / legacy: symmetry-fold body yaw; catalog offset applies here.
-    sym_input = object_yaw + yaw_off + frame.yaw_offset
-    target_sym = normalize_yaw(_fold_yaw_symmetry(sym_input, sym))
-
-    target_yaw = torch.where(long_aligned_path, target_long, target_sym)
-
-    closing_axis_w = closing_direction_world_from_target(target_yaw, frame)
-    long_xy = normalize(torch.cat([long_w[:, :2], torch.zeros_like(long_w[:, 2:3])], dim=-1))
-    width_alignment = (closing_axis_w * long_xy).sum(dim=-1).abs()
-
-    # Safety net for the exact failure mode seen in video: if the final opening
-    # direction is closer to the object's length than its width, rotate once.
-    # This only applies when we have a trusted in-plane long axis.
-    wrong_width = long_aligned_path & (width_alignment > 0.5)
-    target_yaw = torch.where(
-        wrong_width,
-        normalize_yaw(target_yaw + 0.5 * math.pi),
-        target_yaw,
+    has_axis = (
+        (torch.norm(long_axis_local, dim=-1) > 1e-6)
+        | (
+            (footprint_xy[:, 0] > 1e-6)
+            & (footprint_xy[:, 1] > 1e-6)
+            & ((footprint_xy[:, 0] - footprint_xy[:, 1]).abs() > 0.003)
+        )
     )
-    closing_axis_w = closing_direction_world_from_target(target_yaw, frame)
-    width_alignment = (closing_axis_w * long_xy).sum(dim=-1).abs()
+
+    # Bias from catalog manual offset + optional per-object frame toggle (0 or π/2).
+    bias = yaw_off + frame.yaw_offset
+    lying_elongated = has_axis & (~upright_mask)
+
+    # Lying elongated: align pads with long axis, close across short width.
+    aligned = object_yaw + bias + torch.where(
+        lying_elongated,
+        torch.full_like(object_yaw, frame.closing_axis_offset),
+        torch.zeros_like(object_yaw),
+    )
+    folded_long = normalize_yaw(_fold_long_axis_yaw(aligned))
+
+    # Upright / round / legacy: symmetry-fold body yaw.
+    sym_input = object_yaw + bias
+    folded_sym = normalize_yaw(_fold_yaw_symmetry(sym_input, sym))
+
+    target_yaw = torch.where(lying_elongated, folded_long, folded_sym)
+
+    # Closing direction in world XY (unit vector, z=0).
+    closing_heading = object_yaw + 0.5 * math.pi
+    closing_axis_w = torch.stack(
+        [
+            torch.cos(closing_heading),
+            torch.sin(closing_heading),
+            torch.zeros_like(closing_heading),
+        ],
+        dim=-1,
+    )
 
     debug = GraspYawDebug(
         object_yaw=object_yaw,
         target_yaw=target_yaw,
         long_axis_w=long_w,
         closing_axis_w=closing_axis_w,
-        width_alignment=width_alignment,
         source=sources,
     )
     return target_yaw, debug
@@ -419,23 +339,3 @@ def compute_grasp_yaw_symmetry(
     """Legacy symmetry-only yaw (round / unknown footprint objects)."""
     _, _, yaw = euler_xyz_from_quat(obj_quat)
     return normalize_yaw(_fold_yaw_symmetry(yaw + yaw_off, sym))
-
-
-def closing_direction_world_from_target(
-    target_yaw: torch.Tensor,
-    frame: GripperFrameConfig | None = None,
-) -> torch.Tensor:
-    """Unit vector in world XY for the finger closing direction at ``target_yaw``."""
-    if frame is None:
-        frame = GripperFrameConfig()
-    heading = normalize_yaw(
-        target_yaw + torch.full_like(target_yaw, 0.5 * math.pi - frame.closing_axis_offset)
-    )
-    return torch.stack(
-        [
-            torch.cos(heading),
-            torch.sin(heading),
-            torch.zeros_like(heading),
-        ],
-        dim=-1,
-    )
