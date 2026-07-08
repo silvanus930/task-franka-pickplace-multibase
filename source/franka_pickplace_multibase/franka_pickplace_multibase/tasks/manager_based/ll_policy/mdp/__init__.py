@@ -20,7 +20,9 @@ observations.py
 
 rewards.py
     orientation_command_error_tanh   tanh-kernel orientation tracking reward
-    gripper_command_tracking         soft reward for matching grip target
+    gripper_command_tracking        — soft reward for matching grip target
+    gripper_grasp_contact_shaping   — HL-aligned contact bonus / empty-close penalty
+    no_close_while_high             — penalty for closing before descending to grasp Z
 """
 
 # Pull in the complete standard Isaac Lab MDP library (observations, rewards,
@@ -47,8 +49,7 @@ from .observations import (  # noqa: F401
 # Custom reward terms.
 from .rewards import (  # noqa: F401
     gripper_command_tracking,
+    gripper_grasp_contact_shaping,
+    no_close_while_high,
     orientation_command_error_tanh,
 )
-
-# Custom curriculum terms.
-from .curriculums import override_pose_z_range  # noqa: F401

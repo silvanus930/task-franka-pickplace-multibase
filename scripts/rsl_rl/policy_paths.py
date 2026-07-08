@@ -75,6 +75,9 @@ def sync_best_policy(
         source = os.path.abspath(source)
         if not os.path.isfile(source):
             raise FileNotFoundError(f"Checkpoint file not found: {source}")
+        if os.path.samefile(source, BEST_POLICY_CHECKPOINT):
+            print(f"[INFO] Using best_policy checkpoint (already in place): {BEST_POLICY_CHECKPOINT}")
+            return BEST_POLICY_CHECKPOINT
         shutil.copy2(source, BEST_POLICY_CHECKPOINT)
         print(f"[INFO] Synced LL policy to best_policy: {source} -> {BEST_POLICY_CHECKPOINT}")
         return BEST_POLICY_CHECKPOINT

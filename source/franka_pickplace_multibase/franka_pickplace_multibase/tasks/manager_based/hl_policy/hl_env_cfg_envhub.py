@@ -49,6 +49,7 @@ from typing import Any
 
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -61,6 +62,7 @@ from franka_pickplace_multibase.tasks.manager_based.hl_policy.hl_env_cfg import 
 )
 from franka_pickplace_multibase.tasks.manager_based.ll_policy.ll_env_cfg import LLSceneCfg
 import franka_pickplace_multibase.tasks.manager_based.hl_policy.mdp as mdp
+import franka_pickplace_multibase.tasks.manager_based.ll_policy.mdp as ll_mdp
 
 
 # ---------------------------------------------------------------------------
@@ -522,3 +524,60 @@ class HLEnvCfg_Envhub_SAFE_PLAY(HLEnvCfg_Envhub):
         self.observations.policy.enable_corruption = False
         self.commands.ee_pose.max_retries = 2
         self.commands.ee_pose.log_env_id = 0
+
+
+@configclass
+class HLEnvCfg_Envhub_Finetune(HLEnvCfg_Envhub):
+    """Phase 1: HL-in-the-loop finetune of the LL policy.
+
+    Trains the LL EE-tracking policy *inside* the full HL container task so it
+    learns from the real distribution it is evaluated on: the classical planner
+    drives the ``ee_pose`` / ``grip_cmd`` commands (per-object grasp Z,
+    orientation, sequential picks) while real YCB objects and the KLT bin are in
+    the scene.
+
+    The LL dense-tracking rewards inherited from :class:`LLEnvCfg` reward
+    matching whatever pose/grip the planner commands, so this is a direct
+    finetune of the executor on the eval distribution.  Compared to the
+    empty-table :class:`LLEnvCfg`, this closes the train/eval gap responsible for
+    ``finger_miss`` / ``placed=4/5`` / ``CONTAINER_DISPLACED`` failures.
+
+    Differences from the PLAY/SAFE_PLAY variants:
+    * Many parallel envs + observation corruption ON (training regime).
+    * ``HLSafeTerminationsCfg`` so incidental early bin bumps do not reset every
+      episode before the policy has learned a clean approach.
+    * Adds the ``no_close_while_high`` penalty (attacks the DexCube hover-and-slam
+      failure) on top of the existing ``grip_contact`` shaping.
+
+    Resume from the best LL checkpoint (``model_5400.pt``) and evaluate on the
+    official strict 30-env benchmark; only replace 5400 if the official score
+    improves.
+    """
+
+    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Training regime: many envs, observation noise on.
+        self.scene.num_envs = 4096
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = True
+
+        # Give the planner a full multi-object budget per episode (matches the
+        # preset length applied in _apply_envhub_preset; kept explicit here).
+        # episode_length_s is set from the preset; do not shorten it.
+
+        # ---- Phase 1 reward: penalise closing before descending to grasp Z ----
+        # Attacks the DexCube "hover-and-slam" empty close (placed=4/5).
+        self.rewards.no_close_high = RewTerm(
+            func=ll_mdp.no_close_while_high,
+            weight=0.5,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
+                "grip_command_name": "grip_cmd",
+                "ee_command_name": "ee_pose",
+                "grasp_z_threshold": 0.20,
+                "z_slack": 0.02,
+                "max_penalty_gap": 0.10,
+            },
+        )

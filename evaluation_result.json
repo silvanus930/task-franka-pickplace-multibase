@@ -1,6 +1,6 @@
 {
-  "score": 0.05018518518518518,
-  "log_dir": "/root/leatherback-stack/eval-nav/logs/franka-pickplace-multibase-hl/eval_run_20260707_000901",
+  "score": 0.09097777777777778,
+  "log_dir": "/root/leatherback-stack/eval-nav/logs/franka-pickplace-multibase-hl/eval_run_20260707_005454",
   "full_log": "/root/leatherback-stack/eval-nav/logs/franka-pickplace-multibase-hl/final_5800.txt",
   "metadata": {
     "task_name": "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0",
@@ -22,7 +22,7 @@
     "max_episode_steps": 1500,
     "max_episode_time_s": 30.0,
     "total_episodes_run": 3,
-    "elapsed_seconds": 349.226087808609,
+    "elapsed_seconds": 166.7235050201416,
     "config": {
       "task_name": "Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0",
       "task_module": "franka_pickplace_multibase",
@@ -45,10 +45,10 @@
       "category": "manipulation",
       "enable_cameras": false,
       "timeout_seconds": null,
-      "log_dir": "/root/leatherback-stack/eval-nav/logs/franka-pickplace-multibase-hl/eval_run_20260707_000901",
+      "log_dir": "/root/leatherback-stack/eval-nav/logs/franka-pickplace-multibase-hl/eval_run_20260707_005454",
       "enable_logging": true,
-      "policy_path": "/root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-06_23-52-27_v2_grip_depth_finetune/model_5800.pt"
+      "policy_path": "/root/leatherback-stack/task-franka-pickplace-multibase/logs/rsl_rl/franka_ll_ee_tracking/2026-07-07_00-33-34_v3_grip_contact_finetune/model_5800.pt"
     }
   },
-  "summary": "============================================================\nNavigation Evaluation Summary\n============================================================\n\nStatus: SUCCESS\nFinal Score: 0.0502 (normalized [0, 1])\n\nAggregate Metrics:\n------------------------------------------------------------\n  Total Episodes: 90\n  Successful: 5\n  Failed: 85\n  Timeouts: 0\n  Success Rate: 5.56%\n  Mean Completion Time: 19.33 s\n  Std Completion Time: 1.53 s\n  Mean Steps: 413.48\n  Std Steps: 322.56\n  Step dt: 0.0333 s\n\nEvaluation Metadata:\n------------------------------------------------------------\n  Task: Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0\n  Scoring Version: v2\n  Scenes: ['franka-pickplace-multibase-sample:0']\n  Seeds: [42]\n  Episodes per Scene-Seed: 3\n  Total Episodes Run: 3\n  Max Episode Time: 30.00 s\n  Elapsed Time: 349.23 seconds\n\nInterpretation:\n------------------------------------------------------------\n  Poor performance. Fundamental navigation issues detected.\n\n============================================================"
+  "summary": "============================================================\nNavigation Evaluation Summary\n============================================================\n\nStatus: SUCCESS\nFinal Score: 0.0910 (normalized [0, 1])\n\nAggregate Metrics:\n------------------------------------------------------------\n  Total Episodes: 90\n  Successful: 9\n  Failed: 81\n  Timeouts: 0\n  Success Rate: 10.00%\n  Mean Completion Time: 18.04 s\n  Std Completion Time: 2.75 s\n  Mean Steps: 382.33\n  Std Steps: 299.99\n  Step dt: 0.0333 s\n\nEvaluation Metadata:\n------------------------------------------------------------\n  Task: Nepher-Franka-PickPlace-HL-Multibase-EnvhubPlay-v0\n  Scoring Version: v2\n  Scenes: ['franka-pickplace-multibase-sample:0']\n  Seeds: [42]\n  Episodes per Scene-Seed: 3\n  Total Episodes Run: 3\n  Max Episode Time: 30.00 s\n  Elapsed Time: 166.72 seconds\n\nInterpretation:\n------------------------------------------------------------\n  Poor performance. Fundamental navigation issues detected.\n\n============================================================"
 }

@@ -24,8 +24,8 @@ Observation space (41D):
     actions            last applied action                                   [7]
 
 Commands:
-    ee_pose     UniformPoseCommandCfg — resampled every 4 s; Z capped for table grasps
-    grip_cmd    GripperCommandCfg     — resampled every 2–4 s with longer close holds
+    ee_pose     UniformPoseCommandCfg — resampled every 4 s mid-episode
+    grip_cmd    GripperCommandCfg     — resampled every 2–3 s (longer close holds)
 """
 
 import math
@@ -103,10 +103,10 @@ class CommandsCfg:
         resampling_time_range=(4.0, 4.0),
         debug_vis=True,
         ranges=mdp.UniformPoseCommandCfg.Ranges(
-            # Franka reachable workspace on the table (Z capped for grasp-height finetune).
+            # Full Franka reachable workspace (5400 baseline — do not cap Z aggressively).
             pos_x=(0.25, 0.65),
             pos_y=(-0.40, 0.40),
-            pos_z=(0.05, 0.15),
+            pos_z=(0.05, 0.55),
             # Orientation: gripper mostly pointing down with full yaw freedom.
             roll=(-0.3, 0.3),
             pitch=(2.8, math.pi),
@@ -114,10 +114,10 @@ class CommandsCfg:
         ),
     )
 
-    # Resampled every 2–4 s so close commands persist through HL-style grasp holds.
+    # Longer close segments than v2 baseline; moderate close probability.
     grip_cmd = mdp.GripperCommandCfg(
-        resampling_time_range=(2.0, 4.0),
-        close_prob=0.6,
+        resampling_time_range=(2.0, 3.0),
+        close_prob=0.55,
     )
 
 
@@ -280,10 +280,26 @@ class RewardsCfg:
     # ---- Gripper state tracking (primary HL gap: finger_miss on v2 baseline) ----
     grip_tracking = RewTerm(
         func=mdp.gripper_command_tracking,
-        weight=1.8,
+        weight=1.4,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"]),
             "command_name": "grip_cmd",
+        },
+    )
+
+    # ---- HL-aligned grasp contact shaping (Phase 1: v3 grip contact finetune) ----
+    grip_contact = RewTerm(
+        func=mdp.gripper_grasp_contact_shaping,
+        weight=0.8,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand", joint_names=["panda_finger_joint.*"]),
+            "grip_command_name": "grip_cmd",
+            "ee_command_name": "ee_pose",
+            "contact_min": 0.010,
+            "contact_max": 0.035,
+            "empty_max": 0.004,
+            "grasp_z_threshold": 0.15,
+            "pose_error_threshold": 0.06,
         },
     )
 
@@ -315,7 +331,7 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """Ramp smoothness penalties and tighten grasp-height command sampling."""
+    """Ramp smoothness penalties to encourage fluid motion over training."""
 
     action_rate = CurrTerm(
         func=mdp.modify_reward_weight,
@@ -324,15 +340,6 @@ class CurriculumCfg:
     joint_vel = CurrTerm(
         func=mdp.modify_reward_weight,
         params={"term_name": "joint_vel", "weight": -0.005, "num_steps": 10_000},
-    )
-    # Phase 2: sample even lower Z targets matching shallow HL grasps (obj=4, z≈0.01 m).
-    ee_pose_z_table = CurrTerm(
-        func=mdp.modify_term_cfg,
-        params={
-            "address": "commands.ee_pose.ranges.pos_z",
-            "modify_fn": mdp.override_pose_z_range,
-            "modify_params": {"z_range": (0.02, 0.15), "num_steps": 5_000},
-        },
     )
 
 

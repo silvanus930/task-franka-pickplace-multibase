@@ -31,7 +31,7 @@ import torch
 
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import quat_error_magnitude, quat_mul
+from isaaclab.utils.math import combine_frame_transforms, quat_error_magnitude, quat_mul
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -92,3 +92,89 @@ def gripper_command_tracking(
 
     error = (current_fraction - target_fraction).abs()  # (N,)
     return 1.0 - torch.tanh(error / 0.2)
+
+
+def gripper_grasp_contact_shaping(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    grip_command_name: str,
+    ee_command_name: str,
+    open_val: float = 0.04,
+    contact_min: float = 0.010,
+    contact_max: float = 0.035,
+    empty_max: float = 0.004,
+    grasp_z_threshold: float = 0.15,
+    pose_error_threshold: float = 0.06,
+) -> torch.Tensor:
+    """Shape gripper behaviour at table-grasp contexts to match HL verify.
+
+    HL grasp security requires ``finger_open >= contact_min`` (object between
+    fingers).  An empty slam reads as ``finger_open < empty_max``.
+
+    Active only when the commanded EE is low (table grasp band) **and** the
+    arm is near the pose target **and** close is commanded.  Elsewhere the
+    term is zero so full open/close tracking still comes from
+    :func:`gripper_command_tracking`.
+
+    Returns a (N,) tensor in approximately [-1, 1].
+    """
+    robot: Articulation = env.scene[asset_cfg.name]
+    finger_open = robot.data.joint_pos[:, asset_cfg.joint_ids].mean(dim=-1)
+
+    grip_close = env.command_manager.get_command(grip_command_name).squeeze(-1) > 0.5
+    ee_cmd = env.command_manager.get_command(ee_command_name)
+    cmd_z = ee_cmd[:, 2]
+
+    des_pos_w, _ = combine_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, ee_cmd[:, :3]
+    )
+    ee_pos_w = robot.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    pos_err = torch.norm(ee_pos_w - des_pos_w, dim=-1)
+
+    at_grasp = (cmd_z <= grasp_z_threshold) & (pos_err < pose_error_threshold) & grip_close
+
+    in_contact = (finger_open >= contact_min) & (finger_open <= contact_max)
+    contact_rew = in_contact.float()
+
+    empty_slam = finger_open < empty_max
+    shaping = torch.where(empty_slam, -contact_rew.new_ones(()), contact_rew)
+
+    return torch.where(at_grasp, shaping, torch.zeros_like(finger_open))
+
+
+def no_close_while_high(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    grip_command_name: str,
+    ee_command_name: str,
+    grasp_z_threshold: float = 0.20,
+    z_slack: float = 0.02,
+    max_penalty_gap: float = 0.10,
+) -> torch.Tensor:
+    """Penalise closing the gripper before the EE has descended to the target Z.
+
+    Targets the ``placed=4/5`` / DexCube "hover-and-slam" failure: the arm
+    commands close while still ~5 cm above the grasp plane, producing an empty
+    close (``finger_miss``).  The penalty is active only in the table-grasp band
+    (commanded Z low) when close is commanded, and scales with how far above the
+    commanded Z the EE currently is.
+
+    The term is <= 0 (a penalty).  Returns a (N,) tensor.
+    """
+    robot: Articulation = env.scene[asset_cfg.name]
+
+    grip_close = env.command_manager.get_command(grip_command_name).squeeze(-1) > 0.5
+    ee_cmd = env.command_manager.get_command(ee_command_name)
+    cmd_z = ee_cmd[:, 2]
+
+    des_pos_w, _ = combine_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, ee_cmd[:, :3]
+    )
+    ee_pos_w = robot.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    # Positive when the EE is still above the commanded grasp height.
+    z_gap = (ee_pos_w[:, 2] - des_pos_w[:, 2]).clamp(min=0.0)
+
+    active = (cmd_z <= grasp_z_threshold) & grip_close & (z_gap > z_slack)
+    penalty = -(z_gap - z_slack).clamp(max=max_penalty_gap) / max_penalty_gap
+
+    return torch.where(active, penalty, torch.zeros_like(z_gap))
