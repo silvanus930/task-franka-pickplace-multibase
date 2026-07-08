@@ -154,6 +154,7 @@ from .grasp_yaw import (
     ClosingAxis,
     GripperFrameConfig,
     GraspYawDebug,
+    closing_direction_world_from_target,
     compute_grasp_yaw,
     compute_grasp_yaw_symmetry,
     normalize_yaw,
@@ -261,7 +262,7 @@ class PickPlacePlanner:
         grasp_yaw_frame_offset: float = 0.0,
         # After N grasp failures, add +90° yaw flip for elongated objects (safe fallback).
         grasp_yaw_flip_enabled: bool = True,
-        grasp_yaw_flip_after_retries: int = 2,
+        grasp_yaw_flip_after_retries: int = 1,
         grasp_yaw_flip_rad: float = math.pi / 2,
     ) -> None:
         self.num_envs = num_envs
@@ -601,6 +602,10 @@ class PickPlacePlanner:
 
     def _elongated_object_mask(self) -> torch.Tensor:
         """True for objects where a ±90° yaw flip can fix a mis-aligned grasp."""
+        return self._uses_shape_grasp_yaw() & (self._cur_grasp_sym > 1e-6)
+
+    def _uses_shape_grasp_yaw(self) -> torch.Tensor:
+        """True when grasp yaw is tied to object shape (boxes / catalog long axis)."""
         has_catalog = torch.norm(self._cur_grasp_long_axis_local, dim=-1) > 1e-6
         fp = self._cur_footprint_xy
         is_box = (
@@ -608,8 +613,7 @@ class PickPlacePlanner:
             & (fp[:, 1] > 1e-6)
             & ((fp[:, 0] - fp[:, 1]).abs() > 0.003)
         )
-        round_sym = self._cur_grasp_sym <= 1e-6
-        return (has_catalog | is_box) & (~round_sym)
+        return has_catalog | is_box
 
     def _merge_grasp_yaw_debug(self, env_ids: torch.Tensor, debug: GraspYawDebug) -> None:
         """Merge per-env grasp-yaw debug; supports partial env_id batches."""
@@ -624,6 +628,7 @@ class PickPlacePlanner:
         prev.target_yaw[env_ids] = debug.target_yaw
         prev.long_axis_w[env_ids] = debug.long_axis_w
         prev.closing_axis_w[env_ids] = debug.closing_axis_w
+        prev.width_alignment[env_ids] = debug.width_alignment
         for i, eid in enumerate(env_ids.tolist()):
             prev.source[eid] = debug.source[i]
 
@@ -658,11 +663,34 @@ class PickPlacePlanner:
         )
         yaw = normalize_yaw(yaw + self._grasp_yaw_flip[env_ids])
         debug.target_yaw = yaw
+        debug.closing_axis_w = closing_direction_world_from_target(yaw, self._gripper_frame)
+        long_xy = torch.cat(
+            [debug.long_axis_w[:, :2], torch.zeros_like(debug.long_axis_w[:, 2:3])],
+            dim=-1,
+        )
+        long_xy = normalize(long_xy)
+        debug.width_alignment = (debug.closing_axis_w * long_xy).sum(dim=-1).abs()
+
+        # Re-check width after retry flip; +90° flip can land back on the long axis.
+        shape_yaw = self._uses_shape_grasp_yaw()[env_ids]
+        wrong_width = shape_yaw & (debug.width_alignment > 0.5)
+        if wrong_width.any():
+            yaw = torch.where(
+                wrong_width,
+                normalize_yaw(yaw + 0.5 * math.pi),
+                yaw,
+            )
+            debug.target_yaw = yaw
+            debug.closing_axis_w = closing_direction_world_from_target(
+                yaw, self._gripper_frame,
+            )
+            debug.width_alignment = (debug.closing_axis_w * long_xy).sum(dim=-1).abs()
+
         self._merge_grasp_yaw_debug(env_ids, debug)
         return yaw
 
     def _apply_yaw_flip_on_grasp_miss(self, env_mask: torch.Tensor) -> None:
-        """After repeated failures, rotate wrist yaw +90° and retry (elongated objects only)."""
+        """On grasp miss, alternate +90° wrist yaw for elongated/box objects."""
         if not self.grasp_yaw_flip_enabled or not env_mask.any():
             return
         eligible = env_mask & self._elongated_object_mask()
@@ -672,9 +700,11 @@ class PickPlacePlanner:
         if not should_flip.any():
             return
         flip_val = torch.tensor(self.grasp_yaw_flip_rad, device=self.device, dtype=torch.float32)
+        half_flip = 0.5 * self.grasp_yaw_flip_rad
+        currently_flipped = self._grasp_yaw_flip > half_flip
         self._grasp_yaw_flip = torch.where(
             should_flip,
-            flip_val,
+            torch.where(currently_flipped, torch.zeros_like(self._grasp_yaw_flip), flip_val),
             self._grasp_yaw_flip,
         )
 
@@ -831,11 +861,11 @@ class PickPlacePlanner:
 
         grasp_x, grasp_y = self._update_grasp_aim_point(cube_pos_w, cube_quat_w)
 
-        # Wrist-unwind: skip when long-axis yaw is active (±π/2 would break alignment).
-        use_long_axis = torch.norm(self._cur_grasp_long_axis_local, dim=-1) > 1e-6
+        # Wrist-unwind: skip when shape-sensitive grasp yaw is active.
+        shape_yaw = self._uses_shape_grasp_yaw()
         if wrist_angle is not None:
             self._yaw_switch_cd = (self._yaw_switch_cd - 1).clamp_(min=0)
-            unwind_ok = (self._stage <= int(Stage.DESCEND)) & (~use_long_axis)
+            unwind_ok = (self._stage <= int(Stage.DESCEND)) & (~shape_yaw)
             ready = (self._yaw_switch_cd == 0) & unwind_ok
             over_pos = ready & (wrist_angle >  self.wrist_soft_limit) & (self._yaw_k > -self.yaw_k_max)
             over_neg = ready & (wrist_angle < -self.wrist_soft_limit) & (self._yaw_k <  self.yaw_k_max)
@@ -1205,9 +1235,9 @@ class PickPlacePlanner:
             use_goal_ori = self._stage >= int(Stage.CARRY)
             yaw = torch.where(use_goal_ori, goal_yaw_sym, self._yaw)
 
-        use_long_axis = torch.norm(self._cur_grasp_long_axis_local, dim=-1) > 1e-6
+        shape_yaw = self._uses_shape_grasp_yaw()
         in_grasp_approach = self._stage <= int(Stage.GRASP)
-        skip_unwind = use_long_axis & in_grasp_approach
+        skip_unwind = shape_yaw & in_grasp_approach
         yaw = yaw + torch.where(
             skip_unwind,
             torch.zeros_like(yaw),

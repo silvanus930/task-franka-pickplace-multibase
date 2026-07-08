@@ -564,7 +564,7 @@ class HLPoseCommand(CommandTerm):
                 _LOG.info(
                     "[HL] env %d pre_grasp_pose  center=(%.3f,%.3f)  "
                     "source=%s  object_yaw=%.1f°  target_yaw=%.1f°  ee_yaw=%.1f°  "
-                    "yaw_err=%.1f°  long_axis_w=(%.2f,%.2f,%.2f)",
+                    "yaw_err=%.1f°  width_align=%.2f  long_axis_w=(%.2f,%.2f,%.2f)",
                     i,
                     p._object_center_xy[i, 0].item(), p._object_center_xy[i, 1].item(),
                     dbg.source[i],
@@ -572,6 +572,7 @@ class HLPoseCommand(CommandTerm):
                     math.degrees(dbg.target_yaw[i].item()),
                     math.degrees(ee_yaw[0].item()),
                     math.degrees(p._yaw_err[i].item()),
+                    dbg.width_alignment[i].item(),
                     dbg.long_axis_w[i, 0].item(), dbg.long_axis_w[i, 1].item(),
                     dbg.long_axis_w[i, 2].item(),
                 )
@@ -627,7 +628,8 @@ class HLPoseCommand(CommandTerm):
                 _LOG.info(
                     "[HL] env %d grasp_yaw  source=%s  object_yaw=%.1f°  "
                     "target_yaw=%.1f°  ee_yaw=%.1f°  yaw_err=%.1f°  "
-                    "long_axis_w=(%.3f,%.3f,%.3f)  closing_w=(%.3f,%.3f,%.3f)",
+                    "width_align=%.2f  long_axis_w=(%.3f,%.3f,%.3f)  "
+                    "closing_w=(%.3f,%.3f,%.3f)",
                     i,
                     dbg.source[i],
                     math.degrees(dbg.object_yaw[i].item()),
@@ -638,6 +640,7 @@ class HLPoseCommand(CommandTerm):
                         )[2][0].item()
                     ),
                     math.degrees(p._yaw_err[i].item()),
+                    dbg.width_alignment[i].item(),
                     dbg.long_axis_w[i, 0].item(), dbg.long_axis_w[i, 1].item(), dbg.long_axis_w[i, 2].item(),
                     dbg.closing_axis_w[i, 0].item(), dbg.closing_axis_w[i, 1].item(), dbg.closing_axis_w[i, 2].item(),
                 )
@@ -868,7 +871,7 @@ class HLPoseCommandCfg(CommandTermCfg):
 
     # Safe fallback: after N grasp failures, retry with +90° wrist yaw (elongated objects).
     grasp_yaw_flip_enabled: bool = True
-    grasp_yaw_flip_after_retries: int = 2
+    grasp_yaw_flip_after_retries: int = 1
     grasp_yaw_flip_rad: float = math.pi / 2
 
     # Container drop mode: disables yaw gate; goal Z = bin rim target.
