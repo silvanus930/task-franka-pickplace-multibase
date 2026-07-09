@@ -22,10 +22,6 @@ Usage
 
 # Cap training iterations:
     python train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --max_iterations 3000
-
-# Record training clips (use fewer envs; enables cameras automatically):
-    python train.py --task=Nepher-Franka-PickPlace-LL-v0 --headless --video \\
-        --num_envs 64 --video_length 200 --video_interval 2000
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -46,32 +42,9 @@ parser.add_argument("--task", type=str, default="Nepher-Franka-PickPlace-LL-v0",
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="Agent config entry point key.")
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Override max training iterations.")
-parser.add_argument(
-    "--iteration_chunk",
-    type=int,
-    default=None,
-    help="Train this many iterations then exit (for chunked train/eval loops). "
-    "Defaults to --max_iterations when unset.",
-)
-parser.add_argument(
-    "--log_dir",
-    type=str,
-    default=None,
-    help="Reuse an existing run log directory (required for chunked resume).",
-)
-parser.add_argument(
-    "--save_interval",
-    type=int,
-    default=None,
-    help="Override checkpoint save interval (iterations).",
-)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
-
-if args_cli.video:
-    args_cli.enable_cameras = True
-
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
@@ -97,12 +70,6 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import franka_pickplace_multibase.tasks  # noqa: F401
-from franka_pickplace_multibase.tasks.manager_based.hl_policy.hl_env_cfg_envhub import (
-    HLEnvCfg_Envhub,
-    configure_physx_gpu_for_hl_envhub,
-)
-
-import policy_paths  # isort: skip
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -117,28 +84,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
-    if isinstance(env_cfg, HLEnvCfg_Envhub):
-        configure_physx_gpu_for_hl_envhub(env_cfg, env_cfg.scene.num_envs)
     if args_cli.max_iterations is not None:
         agent_cfg.max_iterations = args_cli.max_iterations
-    if args_cli.save_interval is not None:
-        agent_cfg.save_interval = args_cli.save_interval
 
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    log_root_path = policy_paths.log_root_path(agent_cfg.experiment_name)
+    log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     print(f"[INFO] Logging experiment to: {log_root_path}")
 
-    if args_cli.log_dir:
-        log_dir = os.path.abspath(os.path.expanduser(args_cli.log_dir))
-        os.makedirs(log_dir, exist_ok=True)
-        print(f"[INFO] Using existing log directory: {log_dir}")
-    else:
-        log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        if agent_cfg.run_name:
-            log_dir += f"_{agent_cfg.run_name}"
-        log_dir = os.path.join(log_root_path, log_dir)
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if agent_cfg.run_name:
+        log_dir += f"_{agent_cfg.run_name}"
+    log_dir = os.path.join(log_root_path, log_dir)
 
     # Resolve resume checkpoint *before* creating log_dir to avoid an empty
     # timestamped folder being picked up by get_checkpoint_path.
@@ -178,12 +136,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
-    learn_iters = args_cli.iteration_chunk if args_cli.iteration_chunk is not None else agent_cfg.max_iterations
-    print(f"[INFO] Training for {learn_iters} iteration(s) (current={runner.current_learning_iteration})")
-    runner.learn(num_learning_iterations=learn_iters, init_at_random_ep_len=True)
-    final_ckpt = os.path.join(log_dir, f"model_{runner.current_learning_iteration}.pt")
-    if os.path.isfile(final_ckpt):
-        print(f"[INFO] Latest checkpoint: {final_ckpt}")
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
     env.close()
 

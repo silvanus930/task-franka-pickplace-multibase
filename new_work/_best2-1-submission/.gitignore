@@ -1,0 +1,25 @@
+/best_policy/videos
+*.mp4
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Distribution / packaging
+*.egg-info/
+build/
+dist/
+
+# Training & experiment outputs
+logs/
+outputs/
+wandb/
+
+# OS / editors
+.DS_Store
+.idea/

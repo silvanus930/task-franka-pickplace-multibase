@@ -49,7 +49,6 @@ from typing import Any
 
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -58,61 +57,9 @@ from isaaclab.utils import configclass
 from franka_pickplace_multibase.tasks.manager_based.hl_policy.hl_env_cfg import (
     GOAL_POS_DEFAULT,
     HLEnvCfg,
-    HLSafeTerminationsCfg,
 )
 from franka_pickplace_multibase.tasks.manager_based.ll_policy.ll_env_cfg import LLSceneCfg
 import franka_pickplace_multibase.tasks.manager_based.hl_policy.mdp as mdp
-import franka_pickplace_multibase.tasks.manager_based.ll_policy.mdp as ll_mdp
-
-
-# ---------------------------------------------------------------------------
-# PhysX GPU scaling for dense HL EnvHub scenes
-# ---------------------------------------------------------------------------
-
-# Peak per-env demand observed from PhysX overflow logs at num_envs=4096.
-_PATCH_PER_ENV = 421_045 / 4096
-_AGG_PAIRS_PER_ENV = 45_000 / 4096
-_PHYSX_HEADROOM = 1.5
-
-
-def _next_pow2(value: int) -> int:
-    if value <= 1:
-        return 1
-    value -= 1
-    value |= value >> 1
-    value |= value >> 2
-    value |= value >> 4
-    value |= value >> 8
-    value |= value >> 16
-    return value + 1
-
-
-def configure_physx_gpu_for_hl_envhub(cfg: Any, num_envs: int) -> None:
-    """Scale PhysX GPU buffers for HL EnvHub scenes (robot + table + KLT + YCB).
-
-    :class:`LLEnvCfg` sets small PhysX limits for empty-table LL training; HL EnvHub
-    finetune at thousands of parallel envs needs much larger contact/patch capacity.
-    Call again after ``--num_envs`` CLI overrides so buffers match the final count.
-    """
-    patch_count = int(_PATCH_PER_ENV * num_envs * _PHYSX_HEADROOM)
-    agg_pairs = int(_AGG_PAIRS_PER_ENV * num_envs * _PHYSX_HEADROOM)
-
-    cfg.sim.physx.gpu_max_rigid_patch_count = max(
-        cfg.sim.physx.gpu_max_rigid_patch_count,
-        _next_pow2(patch_count),
-    )
-    cfg.sim.physx.gpu_total_aggregate_pairs_capacity = max(
-        cfg.sim.physx.gpu_total_aggregate_pairs_capacity,
-        _next_pow2(max(agg_pairs, 256 * 1024)),
-    )
-    cfg.sim.physx.gpu_found_lost_aggregate_pairs_capacity = max(
-        cfg.sim.physx.gpu_found_lost_aggregate_pairs_capacity,
-        _next_pow2(int(agg_pairs * 64)),
-    )
-    cfg.sim.physx.gpu_max_rigid_contact_count = max(
-        cfg.sim.physx.gpu_max_rigid_contact_count,
-        _next_pow2(max(2**23, int(num_envs * 512))),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +202,12 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         # ---- Episode length ----
         if hasattr(preset, "max_episode_length_s"):
             self.episode_length_s = preset.max_episode_length_s
+        # Override to use the validator's full step budget (eval max_episode_steps
+        # = 1500 steps = 50s at 30Hz). Env-var tunable for measured comparison.
+        import os as _os
+        _ep = _os.environ.get("NEPHER_EP_LEN_S")
+        if _ep:
+            self.episode_length_s = float(_ep)
 
     # ------------------------------------------------------------------
     # Typed-scenario wiring (TypedPrebakedScenarioStrategy)
@@ -298,8 +251,7 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         catalog_grasp_z   = [obj.grasp_z_offset              for obj in OBJECT_CATALOG[:num_catalog]]
         catalog_grasp_sym = [obj.grasp_sym                   for obj in OBJECT_CATALOG[:num_catalog]]
         catalog_grasp_yaw = [obj.effective_grasp_yaw_offset() for obj in OBJECT_CATALOG[:num_catalog]]
-        catalog_upright   = [obj.upright_height              for obj in OBJECT_CATALOG[:num_catalog]]
-        catalog_grasp_off = [obj.grasp_offset_local           for obj in OBJECT_CATALOG[:num_catalog]]
+        catalog_grasp_offset_local = [obj.grasp_offset_local for obj in OBJECT_CATALOG[:num_catalog]]
 
         # ---- Commands: keep container-drop mode (same as base HLEnvCfg) ----
         # container_drop=True is the default from HLCommandsCfg; do NOT set False.
@@ -309,8 +261,7 @@ class HLEnvCfg_Envhub(HLEnvCfg):
         self.commands.ee_pose.grasp_z_offsets   = catalog_grasp_z
         self.commands.ee_pose.grasp_syms        = catalog_grasp_sym
         self.commands.ee_pose.grasp_yaw_offsets = catalog_grasp_yaw
-        self.commands.ee_pose.upright_heights   = catalog_upright
-        self.commands.ee_pose.grasp_offset_locals = catalog_grasp_off
+        self.commands.ee_pose.grasp_offset_locals = catalog_grasp_offset_local
         # goal_pose_visualizer_cfg stays as _MARKER_CFG (container opening marker)
 
         # ---- Events: typed-scenario object reset + container placement ----
@@ -541,94 +492,10 @@ class HLEnvCfg_Envhub(HLEnvCfg):
 
 @configclass
 class HLEnvCfg_Envhub_PLAY(HLEnvCfg_Envhub):
-    """Play / evaluation variant: full 30-scenario benchmark, no observation noise.
-
-    ``play.py --num_envs`` may still override this for quick local smoke tests
-    after Hydra config construction.
-    """
+    """Play / evaluation variant: fewer envs, no observation noise."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.scene.num_envs = 30
+        self.scene.num_envs = 4
         self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False
-
-
-@configclass
-class HLEnvCfg_Envhub_SAFE_PLAY(HLEnvCfg_Envhub):
-    """Safe diagnostic EnvHub variant for production-readiness debugging.
-
-    This variant keeps object/container fall and drop checks active, but relaxes
-    incidental container displacement. It is intentionally separate from
-    ``HLEnvCfg_Envhub_PLAY`` so official 30-env benchmark evaluation remains
-    strict and comparable.
-    """
-
-    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self.scene.num_envs = 1
-        self.scene.env_spacing = 2.5
-        self.episode_length_s = 45.0
-        self.observations.policy.enable_corruption = False
-        self.commands.ee_pose.max_retries = 2
-        self.commands.ee_pose.log_env_id = 0
-
-
-@configclass
-class HLEnvCfg_Envhub_Finetune(HLEnvCfg_Envhub):
-    """Phase 1: HL-in-the-loop finetune of the LL policy.
-
-    Trains the LL EE-tracking policy *inside* the full HL container task so it
-    learns from the real distribution it is evaluated on: the classical planner
-    drives the ``ee_pose`` / ``grip_cmd`` commands (per-object grasp Z,
-    orientation, sequential picks) while real YCB objects and the KLT bin are in
-    the scene.
-
-    The LL dense-tracking rewards inherited from :class:`LLEnvCfg` reward
-    matching whatever pose/grip the planner commands, so this is a direct
-    finetune of the executor on the eval distribution.  Compared to the
-    empty-table :class:`LLEnvCfg`, this closes the train/eval gap responsible for
-    ``finger_miss`` / ``placed=4/5`` / ``CONTAINER_DISPLACED`` failures.
-
-    Differences from the PLAY/SAFE_PLAY variants:
-    * Many parallel envs + observation corruption ON (training regime).
-    * ``HLSafeTerminationsCfg`` so incidental early bin bumps do not reset every
-      episode before the policy has learned a clean approach.
-    * Adds the ``no_close_while_high`` penalty (attacks the DexCube hover-and-slam
-      failure) on top of the existing ``grip_contact`` shaping.
-
-    Resume from the best LL checkpoint (``model_5400.pt``) and evaluate on the
-    official strict 30-env benchmark; only replace 5400 if the official score
-    improves.
-    """
-
-    terminations: HLSafeTerminationsCfg = HLSafeTerminationsCfg()
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        # Training regime: many envs, observation noise on.
-        self.scene.num_envs = 4096
-        self.scene.env_spacing = 2.5
-        self.observations.policy.enable_corruption = True
-        configure_physx_gpu_for_hl_envhub(self, self.scene.num_envs)
-
-        # Give the planner a full multi-object budget per episode (matches the
-        # preset length applied in _apply_envhub_preset; kept explicit here).
-        # episode_length_s is set from the preset; do not shorten it.
-
-        # ---- Phase 1 reward: penalise closing before descending to grasp Z ----
-        # Attacks the DexCube "hover-and-slam" empty close (placed=4/5).
-        self.rewards.no_close_high = RewTerm(
-            func=ll_mdp.no_close_while_high,
-            weight=0.5,
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
-                "grip_command_name": "grip_cmd",
-                "ee_command_name": "ee_pose",
-                "grasp_z_threshold": 0.20,
-                "z_slack": 0.02,
-                "max_penalty_gap": 0.10,
-            },
-        )
